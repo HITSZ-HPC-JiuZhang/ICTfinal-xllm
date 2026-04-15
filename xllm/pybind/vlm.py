@@ -49,6 +49,13 @@ class VLM:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
+        speculative_algorithm: str = "MTP",
+        speculative_suffix_cache_max_depth: int = 64,
+        speculative_suffix_max_spec_factor: float = 1.0,
+        speculative_suffix_max_spec_offset: float = 0.0,
+        speculative_suffix_min_token_prob: float = 0.1,
+        speculative_suffix_max_cached_requests: int = -1,
+        speculative_suffix_use_tree_spec: bool = False,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -76,6 +83,13 @@ class VLM:
         options.max_seqs_per_batch = max_seqs_per_batch
         options.max_tokens_per_chunk_for_prefill = max_tokens_per_chunk_for_prefill
         options.num_speculative_tokens = num_speculative_tokens
+        options.speculative_algorithm = speculative_algorithm
+        options.speculative_suffix_cache_max_depth = speculative_suffix_cache_max_depth
+        options.speculative_suffix_max_spec_factor = speculative_suffix_max_spec_factor
+        options.speculative_suffix_max_spec_offset = speculative_suffix_max_spec_offset
+        options.speculative_suffix_min_token_prob = speculative_suffix_min_token_prob
+        options.speculative_suffix_max_cached_requests = speculative_suffix_max_cached_requests
+        options.speculative_suffix_use_tree_spec = speculative_suffix_use_tree_spec
         options.num_request_handling_threads = num_request_handling_threads
         options.communication_backend = communication_backend
         options.rank_tablefile = rank_tablefile

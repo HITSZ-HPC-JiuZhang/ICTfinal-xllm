@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "runtime/speculative_worker_impl.h"
+#include "util/prompt_lookup_cache.h"
 #include "util/suffix_decoding_cache.h"
 
 namespace xllm {
@@ -48,7 +49,11 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
 
  private:
   std::unique_ptr<SuffixDecodingCache> suffix_cache_;
+  std::unique_ptr<PromptLookupCache> prompt_lookup_cache_;
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;
+  std::vector<int32_t> max_accepted_tokens_per_seq_;
+  int32_t recent_tokens_max_size_ = 0;
+  bool use_prompt_lookup_cache_ = false;
 };
 }  // namespace xllm

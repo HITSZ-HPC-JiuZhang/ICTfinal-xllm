@@ -222,9 +222,13 @@ Master::Master(const Options& options, EngineType type)
   } else if (type == EngineType::SSM) {
     // create a speculative engine if draft model path is provided
     const auto draft_model_path = options_.draft_model_path().value_or("");
-    const bool use_suffix_spec = options_.speculative_algorithm() == "Suffix";
+    const std::string speculative_algorithm = options_.speculative_algorithm();
+    const bool use_suffix_spec = speculative_algorithm == "Suffix" ||
+                                 speculative_algorithm == "PLD" ||
+                                 speculative_algorithm == "PromptLookup";
     CHECK(use_suffix_spec || !draft_model_path.empty())
-        << "draft model path is required unless --speculative_algorithm=Suffix";
+        << "draft model path is required unless using prompt lookup "
+           "speculative decoding";
     const auto draft_devices = DeviceNameUtils::parse_devices(
         options_.draft_devices().value_or("auto"));
     LOG(INFO) << "Using draft devices: "

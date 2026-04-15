@@ -42,16 +42,24 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+namespace {
+
+bool is_prompt_lookup_speculative_algorithm(const std::string& algo) {
+  return algo == "Suffix" || algo == "PLD" || algo == "PromptLookup";
+}
+
+}  // namespace
+
 Worker::Worker(const ParallelArgs& parallel_args,
                const torch::Device& device,
                const runtime::Options& options,
                WorkerType worker_type) {
   if (options.enable_speculative_decode()) {
-    auto algo = FLAGS_speculative_algorithm;
+    auto algo = options.speculative_algorithm();
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algo;
     if (algo == "Eagle3") {
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
-    } else if (algo == "Suffix") {
+    } else if (is_prompt_lookup_speculative_algorithm(algo)) {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else {
       // Default: MTP

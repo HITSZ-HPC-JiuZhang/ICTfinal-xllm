@@ -61,6 +61,10 @@ runtime::Options SuffixTargetOptions(const runtime::Options& options) {
   opts.enable_schedule_overlap(false);
   return opts;
 }
+
+bool is_prompt_lookup_algorithm(const std::string& algo) {
+  return algo == "PLD" || algo == "PromptLookup";
+}
 }  // namespace
 
 SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
@@ -70,9 +74,22 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
                             device,
                             options,
                             SuffixTargetOptions(options)) {
-  suffix_cache_ = std::make_unique<SuffixDecodingCache>(
-      options_.speculative_suffix_cache_max_depth(),
-      options_.speculative_suffix_max_cached_requests());
+  use_prompt_lookup_cache_ =
+      is_prompt_lookup_algorithm(options_.speculative_algorithm());
+  recent_tokens_max_size_ = options_.speculative_suffix_cache_max_depth();
+  if (use_prompt_lookup_cache_) {
+    constexpr int32_t kPromptLookupMinNgramSize = 3;
+    constexpr int32_t kPromptLookupMaxNgramSize = 8;
+    const int32_t prompt_lookup_max_ngram_size =
+        std::max(kPromptLookupMinNgramSize,
+                 std::min(kPromptLookupMaxNgramSize, recent_tokens_max_size_));
+    prompt_lookup_cache_ = std::make_unique<PromptLookupCache>(
+        prompt_lookup_max_ngram_size, kPromptLookupMinNgramSize);
+  } else {
+    suffix_cache_ = std::make_unique<SuffixDecodingCache>(
+        options_.speculative_suffix_cache_max_depth(),
+        options_.speculative_suffix_max_cached_requests());
+  }
 }
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
@@ -107,7 +124,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
   const int32_t num_sequences = input_params.num_sequences;
   const auto& request_ids = input_params.request_ids;
 
-  if (suffix_cache_ != nullptr &&
+  if ((suffix_cache_ != nullptr || prompt_lookup_cache_ != nullptr) &&
       request_ids.size() == static_cast<size_t>(num_sequences)) {
     torch::Tensor token_ids = safe_to(input.token_ids, torch::kCPU);
     Slice<int32_t> tokens_ids_slice = {
@@ -126,16 +143,22 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
         continue;
       }
 
-      if (!suffix_cache_->has_active_request(req_id)) {
+      if (use_prompt_lookup_cache_) {
+        if (!prompt_lookup_cache_->has_request(req_id)) {
+          prompt_lookup_cache_->start_request(req_id, seq_tokens);
+          suffix_recent_tokens_[req_id].clear();
+        } else {
+          prompt_lookup_cache_->add_prompt(req_id, seq_tokens);
+        }
+      } else if (!suffix_cache_->has_active_request(req_id)) {
         suffix_cache_->start_request(req_id, seq_tokens);
         suffix_recent_tokens_[req_id].clear();
       } else {
         suffix_cache_->add_active_prompt(req_id, seq_tokens);
       }
-      append_tokens_with_limit(
-          suffix_recent_tokens_[req_id],
-          seq_tokens,
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
+      append_tokens_with_limit(suffix_recent_tokens_[req_id],
+                               seq_tokens,
+                               static_cast<size_t>(recent_tokens_max_size_));
     }
 
     torch::Tensor next_tokens =
@@ -155,12 +178,13 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
         if (req_id.empty()) {
           continue;
         }
-        suffix_cache_->add_active_response(req_id,
-                                           std::span<const int32_t>(&token, 1));
-        append_tokens_with_limit(
-            suffix_recent_tokens_[req_id],
-            std::span<const int32_t>(&token, 1),
-            static_cast<size_t>(suffix_cache_->max_tree_depth()));
+        if (!use_prompt_lookup_cache_) {
+          suffix_cache_->add_active_response(
+              req_id, std::span<const int32_t>(&token, 1));
+        }
+        append_tokens_with_limit(suffix_recent_tokens_[req_id],
+                                 std::span<const int32_t>(&token, 1),
+                                 static_cast<size_t>(recent_tokens_max_size_));
       }
     }
   }
@@ -180,7 +204,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const auto& request_ids = input.input_params.request_ids;
 
   const bool has_request_ids =
-      suffix_cache_ != nullptr &&
+      (suffix_cache_ != nullptr || prompt_lookup_cache_ != nullptr) &&
       request_ids.size() == static_cast<size_t>(num_sequences);
   if (has_request_ids) {
     std::unordered_set<std::string> current_req_ids;
@@ -192,7 +216,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
     for (const auto& req_id : suffix_active_decode_req_ids_) {
       if (current_req_ids.find(req_id) == current_req_ids.end()) {
-        if (suffix_cache_->has_active_request(req_id)) {
+        if (use_prompt_lookup_cache_) {
+          prompt_lookup_cache_->stop_request(req_id);
+        } else if (suffix_cache_->has_active_request(req_id)) {
           suffix_cache_->stop_request(req_id);
         }
         suffix_recent_tokens_.erase(req_id);
@@ -211,6 +237,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
   std::vector<std::string> req_ids(num_sequences);
+  max_accepted_tokens_per_seq_.assign(num_sequences, num_val_tokens);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     int32_t fallback_token = input_tokens_slice[seq_id];
@@ -218,7 +245,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       draft_tokens_flat.emplace_back(fallback_token);
     }
 
-    if (suffix_cache_ == nullptr ||
+    if ((suffix_cache_ == nullptr && prompt_lookup_cache_ == nullptr) ||
         request_ids.size() != static_cast<size_t>(num_sequences)) {
       continue;
     }
@@ -229,38 +256,58 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     }
     req_ids[seq_id] = req_id;
 
-    if (!suffix_cache_->has_active_request(req_id)) {
+    if (use_prompt_lookup_cache_) {
+      if (!prompt_lookup_cache_->has_request(req_id)) {
+        LOG_EVERY_N(WARNING, 100)
+            << "PLD request cache missing during decode, falling back to "
+               "one accepted token for this step, req_id="
+            << req_id;
+        max_accepted_tokens_per_seq_[seq_id] = 1;
+        continue;
+      }
+    } else if (!suffix_cache_->has_active_request(req_id)) {
       suffix_cache_->start_request(
           req_id, std::span<const int32_t>(&fallback_token, 1));
       suffix_recent_tokens_[req_id].clear();
-      append_tokens_with_limit(
-          suffix_recent_tokens_[req_id],
-          std::span<const int32_t>(&fallback_token, 1),
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
+      append_tokens_with_limit(suffix_recent_tokens_[req_id],
+                               std::span<const int32_t>(&fallback_token, 1),
+                               static_cast<size_t>(recent_tokens_max_size_));
     }
 
     auto& history = suffix_recent_tokens_[req_id];
     if (history.empty()) {
-      append_tokens_with_limit(
-          history,
-          std::span<const int32_t>(&fallback_token, 1),
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
+      append_tokens_with_limit(history,
+                               std::span<const int32_t>(&fallback_token, 1),
+                               static_cast<size_t>(recent_tokens_max_size_));
     }
 
-    SuffixDecodingDraft draft = suffix_cache_->speculate(
-        req_id,
-        std::span<const int32_t>(history.data(), history.size()),
-        /*max_spec_tokens=*/num_speculative_tokens,
-        options_.speculative_suffix_max_spec_factor(),
-        options_.speculative_suffix_max_spec_offset(),
-        options_.speculative_suffix_min_token_prob(),
-        options_.speculative_suffix_use_tree_spec());
+    std::vector<int32_t> draft_token_ids;
+    if (use_prompt_lookup_cache_) {
+      PromptLookupDraft draft = prompt_lookup_cache_->speculate(
+          req_id,
+          std::span<const int32_t>(history.data(), history.size()),
+          num_speculative_tokens);
+      draft_token_ids = std::move(draft.token_ids);
+    } else {
+      SuffixDecodingDraft draft = suffix_cache_->speculate(
+          req_id,
+          std::span<const int32_t>(history.data(), history.size()),
+          /*max_spec_tokens=*/num_speculative_tokens,
+          options_.speculative_suffix_max_spec_factor(),
+          options_.speculative_suffix_max_spec_offset(),
+          options_.speculative_suffix_min_token_prob(),
+          options_.speculative_suffix_use_tree_spec());
+      draft_token_ids = std::move(draft.token_ids);
+    }
 
     const int32_t fill_count =
-        std::min<int32_t>(num_speculative_tokens, draft.token_ids.size());
+        std::min<int32_t>(num_speculative_tokens, draft_token_ids.size());
+    if (use_prompt_lookup_cache_) {
+      max_accepted_tokens_per_seq_[seq_id] = fill_count + 1;
+    }
     for (int32_t i = 0; i < fill_count; ++i) {
       draft_tokens_flat[seq_id * num_speculative_tokens + i] =
-          draft.token_ids[i];
+          draft_token_ids[i];
     }
   }
 
@@ -268,16 +315,16 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   prepare_validate_inputs(input, validate_input);
   validate_input.skip_sampling_for_logits_only = true;
 
+  auto draft_token_ids_cpu =
+      torch::tensor(draft_tokens_flat,
+                    torch::TensorOptions().dtype(torch::kInt))
+          .view({num_sequences, num_speculative_tokens});
+  auto draft_token_ids_int =
+      draft_token_ids_cpu.to(validate_input.token_ids.device());
+
   auto& validate_token_ids = validate_input.token_ids;
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
-    std::vector<int32_t> draft_col;
-    draft_col.reserve(num_sequences);
-    for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      draft_col.emplace_back(
-          draft_tokens_flat[seq_id * num_speculative_tokens + i]);
-    }
-    auto draft_col_tensor =
-        torch::tensor(draft_col, validate_token_ids.options());
+    auto draft_col_tensor = draft_token_ids_int.select(/*dim=*/1, /*index=*/i);
     auto mask = (validate_token_ids == -1 * (i + 1));
     validate_token_ids.masked_scatter_(mask, draft_col_tensor);
   }
@@ -292,10 +339,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
               timer.elapsed_seconds());
 
   torch::Tensor draft_token_ids =
-      torch::tensor(draft_tokens_flat,
-                    torch::TensorOptions().dtype(torch::kLong))
-          .view({num_sequences, num_speculative_tokens})
-          .to(target_output.logits.device());
+      draft_token_ids_int.to(target_output.logits.device()).to(torch::kLong);
 
   // RejectionSampler::forward requires draft_probs tensor for interface
   // compatibility, but greedy-only validation does not use its values.
@@ -311,7 +355,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
-  if (suffix_cache_ != nullptr &&
+  if ((suffix_cache_ != nullptr || prompt_lookup_cache_ != nullptr) &&
       request_ids.size() == static_cast<size_t>(num_sequences)) {
     torch::Tensor accepted_tokens =
         safe_to(val_output.next_tokens, torch::kCPU).to(torch::kInt);
@@ -361,12 +405,15 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       }
 
       if (!accepted.empty()) {
-        suffix_cache_->add_active_response(
-            req_id, std::span<const int32_t>(accepted.data(), accepted.size()));
+        if (!use_prompt_lookup_cache_) {
+          suffix_cache_->add_active_response(
+              req_id,
+              std::span<const int32_t>(accepted.data(), accepted.size()));
+        }
         append_tokens_with_limit(
             suffix_recent_tokens_[req_id],
             std::span<const int32_t>(accepted.data(), accepted.size()),
-            static_cast<size_t>(suffix_cache_->max_tree_depth()));
+            static_cast<size_t>(recent_tokens_max_size_));
       }
     }
   }
@@ -402,28 +449,59 @@ SampleOutput SuffixWorkerImpl::validate(
       target_logits.index({ISlice(), num_val_tokens - 1, ISlice()})
           .argmax(/*dim=*/-1, /*keepdim=*/true);
 
-  // Suffix decoding always uses greedy sampling for validation,
-  // regardless of the user's sampling parameters.
-  auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
-  auto rejection_sampler =
-      std::make_unique<RejectionSampler>(greedy_do_sample,
-                                         /*all_random_sample=*/false,
-                                         /*all_greedy_sample=*/true,
-                                         target_output.logprobs,
-                                         target_output.max_top_logprobs,
-                                         rate_controller_,
-                                         enable_fused_kernel_);
+  SampleOutput sample_output;
+  const bool use_pld_greedy_fast_path =
+      use_prompt_lookup_cache_ && !target_output.logprobs &&
+      target_output.max_top_logprobs <= 0 && rate_controller_ == nullptr;
+  if (use_pld_greedy_fast_path) {
+    auto target_token_ids =
+        target_logits.slice(/*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1)
+            .argmax(/*dim=*/-1);
+    auto accepted =
+        target_token_ids == draft_token_ids.to(target_token_ids.device());
+    auto accepted_mask = RejectionSampler::build_accepted_mask(accepted);
+    auto accepted_token_ids =
+        torch::cat({target_token_ids, bonus_token_ids}, /*dim=*/-1);
+    sample_output.next_tokens =
+        torch::where(accepted_mask,
+                     accepted_token_ids,
+                     -torch::ones_like(accepted_token_ids));
+  } else {
+    // Suffix decoding always uses greedy sampling for validation,
+    // regardless of the user's sampling parameters.
+    auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
+    auto rejection_sampler =
+        std::make_unique<RejectionSampler>(greedy_do_sample,
+                                           /*all_random_sample=*/false,
+                                           /*all_greedy_sample=*/true,
+                                           target_output.logprobs,
+                                           target_output.max_top_logprobs,
+                                           rate_controller_,
+                                           enable_fused_kernel_);
 
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
+    sample_output =
+        rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
+                                   draft_probs.to(target_logits.device()),
+                                   target_logits,
+                                   bonus_token_ids,
+                                   /*mask_out_rejected_tokens=*/true);
+  }
 
   auto embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings =
       embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
+
+  for (int32_t seq_id = 0;
+       seq_id < static_cast<int32_t>(max_accepted_tokens_per_seq_.size());
+       ++seq_id) {
+    const int32_t keep_tokens =
+        std::clamp(max_accepted_tokens_per_seq_[seq_id], 1, num_val_tokens);
+    if (keep_tokens < num_val_tokens) {
+      sample_output.next_tokens[seq_id]
+          .slice(/*dim=*/0, /*start=*/keep_tokens)
+          .fill_(-1);
+    }
+  }
 
   torch::Tensor mask = (sample_output.next_tokens == -1).to(torch::kInt64);
   size_t count = mask.sum().item<int64_t>();

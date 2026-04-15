@@ -82,6 +82,28 @@ python3 tools/export_mtp.py \
 
 使用MTP进行推理时，需要同时指定主模型和草稿模型（MTP模型）。
 
+如果使用 Prompt Lookup Decoding，请设置
+`--speculative_algorithm=PLD`（或 `PromptLookup`）以及
+`--num_speculative_tokens`，并且不要设置 `--draft_model`。
+
+#### 无需草稿模型的 Qwen3.5-9B PLD 启动示例
+```bash
+MODEL_PATH="/models/Qwen3.5-9B"
+./xllm \
+  --model $MODEL_PATH \
+  --devices "npu:0,npu:1" \
+  --speculative_algorithm PLD \
+  --num_speculative_tokens 8 \
+  --speculative_suffix_cache_max_depth 64 \
+  --max_memory_utilization 0.90 \
+  --max_tokens_per_batch 132096 \
+  --max_seqs_per_batch 1 \
+  --block_size 128
+```
+
+其中 `64K 输入 + 1K 输出` 可设置为 `66560`，`128K 输入 + 1K 输出`
+可设置为 `132096`。
+
 #### DeepSeek-V3/V3.2/R1 启动示例
 ```bash
 MODEL_PATH="/models/DeepSeek-V3"

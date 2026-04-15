@@ -44,9 +44,14 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+bool is_prompt_lookup_speculative_algorithm(const std::string& algo) {
+  return algo == "Suffix" || algo == "PLD" || algo == "PromptLookup";
+}
+
 bool should_use_ssm_engine(const Options& options) {
   return !options.draft_model_path().value_or("").empty() ||
-         (options.speculative_algorithm() == "Suffix" &&
+         (is_prompt_lookup_speculative_algorithm(
+              options.speculative_algorithm()) &&
           options.num_speculative_tokens() > 0);
 }
 

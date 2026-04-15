@@ -54,6 +54,19 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::max_tokens_per_chunk_for_prefill_)
       .def_readwrite("num_speculative_tokens",
                      &Options::num_speculative_tokens_)
+      .def_readwrite("speculative_algorithm", &Options::speculative_algorithm_)
+      .def_readwrite("speculative_suffix_cache_max_depth",
+                     &Options::speculative_suffix_cache_max_depth_)
+      .def_readwrite("speculative_suffix_max_spec_factor",
+                     &Options::speculative_suffix_max_spec_factor_)
+      .def_readwrite("speculative_suffix_max_spec_offset",
+                     &Options::speculative_suffix_max_spec_offset_)
+      .def_readwrite("speculative_suffix_min_token_prob",
+                     &Options::speculative_suffix_min_token_prob_)
+      .def_readwrite("speculative_suffix_max_cached_requests",
+                     &Options::speculative_suffix_max_cached_requests_)
+      .def_readwrite("speculative_suffix_use_tree_spec",
+                     &Options::speculative_suffix_use_tree_spec_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)
       .def_readwrite("communication_backend", &Options::communication_backend_)

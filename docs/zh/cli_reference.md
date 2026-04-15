@@ -51,12 +51,19 @@ xLLM使用gflags来管理服务启动参数，具体的参数含义如下：
 | `transfer_listen_port` | `int32` | 26000 | 任意可用的端口 | 启用PD分离后配置，对应每张卡上KV Cache Transfer的监听端口 |  |
 
 
-## MTP相关参数
+## 投机解码相关参数
 | 参数名称 | 类型 | 默认值 | 其他值 | 参数含义 | 其他 |
 |:---------:|:---------:|:---------:|:---------:|:---------:|:---------:|
-| `draft_model` | `string` | "" |  | MTP模型所在的路径 | [详情](./features/mtp.md) |
-| `draft_devices` | `string` | "npu:0" | 与`devices`格式保持一致，如`npu:0`或`npu:0,npu:1` | 与devices设置保持一致 |  |
-| `num_speculative_tokens` | `int32` | 0 | 任意整数，建议1或者2 | MTP模型每次step输出token的个数 |  |
+| `draft_model` | `string` | "" |  | MTP模型所在的路径；当 `speculative_algorithm` 为 `PLD` 或 `PromptLookup` 时不需要设置 | [详情](./features/mtp.md) |
+| `draft_devices` | `string` | "npu:0" | 与`devices`格式保持一致，如`npu:0`或`npu:0,npu:1` | 对需要草稿模型的算法应与devices设置保持一致；对 `PLD` 和 `PromptLookup` 不需要设置 |  |
+| `num_speculative_tokens` | `int32` | 0 | 任意正整数；PLD 常用 `8` | 每个 decode step 提议的 speculative token 个数 |  |
+| `speculative_algorithm` | `string` | "MTP" | "MTP"、"Eagle3"、"Suffix"、"PLD"、"PromptLookup" | 选择投机解码算法。`PLD` 与 `PromptLookup` 使用 Prompt Lookup Decoding，不需要草稿模型。 |  |
+| `speculative_suffix_cache_max_depth` | `int32` | 64 | 任意大于0的整数 | 对 `Suffix` 表示 suffix cache 深度；对 `PLD` 表示最大 lookup n-gram 大小上限，并且还会受到内部 `8` 的限制 |  |
+| `speculative_suffix_max_spec_factor` | `double` | 1.0 | 任意非负浮点数 | suffix 投机长度的倍率上限 | 仅 `Suffix` 使用 |
+| `speculative_suffix_max_spec_offset` | `double` | 0.0 | 任意非负浮点数 | suffix 投机长度的加法上限 | 仅 `Suffix` 使用 |
+| `speculative_suffix_min_token_prob` | `double` | 0.1 | `[0,1]` 内任意浮点数 | suffix tree 投机的最小 token 概率阈值 | 仅 `Suffix` 使用 |
+| `speculative_suffix_max_cached_requests` | `int32` | -1 | `-1`、`0` 或任意正整数 | suffix 全局缓存请求上限 | 仅 `Suffix` 使用 |
+| `speculative_suffix_use_tree_spec` | `bool` | false | true | 使用 tree-based suffix speculation 替代 path speculation | 仅 `Suffix` 使用 |
 
 
 ## 图执行相关参数

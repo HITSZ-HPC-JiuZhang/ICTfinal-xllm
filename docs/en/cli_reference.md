@@ -49,12 +49,19 @@ xLLM uses gflags to manage service startup parameters. The specific parameter me
 | `transfer_listen_port` | `int32` | 26000 | Any available port | Configuration when P-D separation is enabled. Corresponds to the listening port for KV Cache Transfer on each card. |  |
 
 
-## MTP Related Parameters
+## Speculative Decoding Parameters
 | Parameter Name | Type | Default Value | Other Values | Description | Notes |
 |:---------:|:---------:|:---------:|:---------:|:---------:|:---------:|
-| `draft_model` | `string` | "" |  | Path to the MTP model. | [Details](./features/mtp.md) |
-| `draft_devices` | `string` | "npu:0" | Same format as `devices`, e.g. `npu:0` or `npu:0,npu:1` | Should be set consistently with the `devices` parameter. |  |
-| `num_speculative_tokens` | `int32` | 0 | Any integer, suggestion 1 or 2 | The number of tokens output by the MTP model per step. |  |
+| `draft_model` | `string` | "" |  | Path to the MTP model. Not required when `speculative_algorithm` is `PLD` or `PromptLookup`. | [Details](./features/mtp.md) |
+| `draft_devices` | `string` | "npu:0" | Same format as `devices`, e.g. `npu:0` or `npu:0,npu:1` | Should be set consistently with the `devices` parameter for draft-model algorithms. It is ignored/not required for `PLD` and `PromptLookup`. |  |
+| `num_speculative_tokens` | `int32` | 0 | Any positive integer; PLD commonly uses `8` | The number of speculative tokens proposed per decode step. |  |
+| `speculative_algorithm` | `string` | "MTP" | "MTP", "Eagle3", "Suffix", "PLD", "PromptLookup" | Selects the speculative decoding algorithm. `PLD` and `PromptLookup` use prompt lookup decoding and do not require a draft model. |  |
+| `speculative_suffix_cache_max_depth` | `int32` | 64 | Any integer greater than 0 | For `Suffix`, this is the suffix cache depth. For `PLD`, it caps the maximum lookup n-gram size together with the internal limit of `8`. |  |
+| `speculative_suffix_max_spec_factor` | `double` | 1.0 | Any non-negative floating-point number | Upper bound factor for suffix-based speculation length. | Used by `Suffix`. |
+| `speculative_suffix_max_spec_offset` | `double` | 0.0 | Any non-negative floating-point number | Additive upper bound for suffix-based speculation length. | Used by `Suffix`. |
+| `speculative_suffix_min_token_prob` | `double` | 0.1 | Any floating-point number in `[0, 1]` | Minimum token probability threshold for suffix-tree speculation. | Used by `Suffix`. |
+| `speculative_suffix_max_cached_requests` | `int32` | -1 | `-1`, `0`, or any positive integer | Maximum number of globally cached requests in suffix speculation. | Used by `Suffix`. |
+| `speculative_suffix_use_tree_spec` | `bool` | false | true | Enables tree-based suffix speculation instead of path speculation. | Used by `Suffix`. |
 
 
 ## Graph Execution Related Parameters

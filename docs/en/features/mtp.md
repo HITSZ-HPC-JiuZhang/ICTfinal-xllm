@@ -82,6 +82,28 @@ Input model references:
 
 When using MTP for inference, you need to specify both the main model and the draft model (MTP model).
 
+For prompt lookup decoding, use `--speculative_algorithm=PLD` (or
+`PromptLookup`) together with `--num_speculative_tokens`, and do not set
+`--draft_model`.
+
+#### Draft-Model-Free Qwen3.5-9B PLD Launch Example
+```bash
+MODEL_PATH="/models/Qwen3.5-9B"
+./xllm \
+  --model $MODEL_PATH \
+  --devices "npu:0,npu:1" \
+  --speculative_algorithm PLD \
+  --num_speculative_tokens 8 \
+  --speculative_suffix_cache_max_depth 64 \
+  --max_memory_utilization 0.90 \
+  --max_tokens_per_batch 132096 \
+  --max_seqs_per_batch 1 \
+  --block_size 128
+```
+
+Use `66560` for the `64K input + 1K output` case, and `132096` for the
+`128K input + 1K output` case.
+
 #### DeepSeek-V3/V3.2/R1 Launch Example
 ```bash
 MODEL_PATH="/models/DeepSeek-V3"

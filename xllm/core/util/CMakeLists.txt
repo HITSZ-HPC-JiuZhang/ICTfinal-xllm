@@ -20,6 +20,7 @@ cc_library(
     lightweightsemaphore.h
     net.h
     pretty_print.h
+    prompt_lookup_cache.h
     scope_guard.h
     slice.h
     spin_lock.h
@@ -43,6 +44,7 @@ cc_library(
     model_config_utils.cpp
     net.cpp
     pretty_print.cpp
+    prompt_lookup_cache.cpp
     suffix_decoding_cache.cpp
     suffix_tree.cpp
     threadpool.cpp
@@ -76,6 +78,7 @@ cc_test(
     util_test
   SRCS
     blocking_counter_test.cpp
+    prompt_lookup_cache_test.cpp
     suffix_decoding_cache_test.cpp
     threadpool_test.cpp
   DEPS
