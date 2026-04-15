@@ -85,6 +85,10 @@ struct Options {
 
   PROPERTY(bool, pld_prefer_recent_match) = false;
 
+  PROPERTY(int32_t, pld_min_ngram_size) = 3;
+
+  PROPERTY(int32_t, pld_max_ngram_size) = 8;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 

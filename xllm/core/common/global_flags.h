@@ -90,6 +90,10 @@ DECLARE_int32(pld_candidate_count);
 
 DECLARE_bool(pld_prefer_recent_match);
 
+DECLARE_int32(pld_min_ngram_size);
+
+DECLARE_int32(pld_max_ngram_size);
+
 DECLARE_int32(num_request_handling_threads);
 
 DECLARE_int32(num_response_handling_threads);

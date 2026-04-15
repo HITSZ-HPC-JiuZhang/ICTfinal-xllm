@@ -89,6 +89,18 @@ class Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
+  PROPERTY(bool, pld_enable_request_stats) = false;
+
+  PROPERTY(int32_t, pld_stats_log_interval) = 1024;
+
+  PROPERTY(int32_t, pld_candidate_count) = 1;
+
+  PROPERTY(bool, pld_prefer_recent_match) = false;
+
+  PROPERTY(int32_t, pld_min_ngram_size) = 3;
+
+  PROPERTY(int32_t, pld_max_ngram_size) = 8;
+
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
 

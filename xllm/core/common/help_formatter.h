@@ -88,7 +88,9 @@ const OptionCategory kMtpOptions = {"SPECULATIVE OPTIONS",
                                      "pld_enable_request_stats",
                                      "pld_stats_log_interval",
                                      "pld_candidate_count",
-                                     "pld_prefer_recent_match"}};
+                                     "pld_prefer_recent_match",
+                                     "pld_min_ngram_size",
+                                     "pld_max_ngram_size"}};
 
 const OptionCategory kXllmServiceOptions = {
     "XLLM-SERVICE OPTIONS",

@@ -116,25 +116,38 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
       is_prompt_lookup_algorithm(options_.speculative_algorithm());
   recent_tokens_max_size_ = options_.speculative_suffix_cache_max_depth();
   if (use_prompt_lookup_cache_) {
-    constexpr int32_t kPromptLookupMinNgramSize = 3;
-    constexpr int32_t kPromptLookupMaxNgramSize = 8;
-    if (recent_tokens_max_size_ < kPromptLookupMinNgramSize) {
+    int32_t prompt_lookup_min_ngram_size =
+        std::max(1, options_.pld_min_ngram_size());
+    int32_t prompt_lookup_max_ngram_size =
+        std::max(prompt_lookup_min_ngram_size, options_.pld_max_ngram_size());
+    if (prompt_lookup_min_ngram_size != options_.pld_min_ngram_size()) {
+      LOG(WARNING) << "PLD min ngram size " << options_.pld_min_ngram_size()
+                   << " is invalid; clamping to "
+                   << prompt_lookup_min_ngram_size;
+    }
+    if (prompt_lookup_max_ngram_size != options_.pld_max_ngram_size()) {
+      LOG(WARNING) << "PLD max ngram size " << options_.pld_max_ngram_size()
+                   << " is smaller than min ngram size "
+                   << prompt_lookup_min_ngram_size << "; raising max to "
+                   << prompt_lookup_max_ngram_size;
+    }
+    if (recent_tokens_max_size_ < prompt_lookup_min_ngram_size) {
       LOG(WARNING) << "PLD recent token history depth "
                    << recent_tokens_max_size_
                    << " is smaller than min ngram size "
-                   << kPromptLookupMinNgramSize
+                   << prompt_lookup_min_ngram_size
                    << "; clamping history depth to keep PLD effective.";
-      recent_tokens_max_size_ = kPromptLookupMinNgramSize;
+      recent_tokens_max_size_ = prompt_lookup_min_ngram_size;
     }
-    const int32_t prompt_lookup_max_ngram_size =
-        std::max(kPromptLookupMinNgramSize,
-                 std::min(kPromptLookupMaxNgramSize, recent_tokens_max_size_));
+    prompt_lookup_max_ngram_size = std::max(
+        prompt_lookup_min_ngram_size,
+        std::min(prompt_lookup_max_ngram_size, recent_tokens_max_size_));
     prompt_lookup_cache_ = std::make_unique<PromptLookupCache>(
-        prompt_lookup_max_ngram_size, kPromptLookupMinNgramSize);
+        prompt_lookup_max_ngram_size, prompt_lookup_min_ngram_size);
     LOG(INFO) << "Prompt lookup decoding enabled: rank=" << parallel_args.rank()
               << ", device=" << device << ", num_speculative_tokens="
               << options_.num_speculative_tokens() << ", ngram_size=["
-              << kPromptLookupMinNgramSize << ", "
+              << prompt_lookup_min_ngram_size << ", "
               << prompt_lookup_max_ngram_size
               << "], recent_tokens_max_size=" << recent_tokens_max_size_;
   } else {

@@ -416,6 +416,15 @@ DEFINE_bool(pld_prefer_recent_match,
             "Whether prompt lookup decoding prefers more recent prompt "
             "matches when continuation lengths tie.");
 
+DEFINE_int32(pld_min_ngram_size,
+             3,
+             "Minimum prompt lookup ngram size. Values below 1 are clamped.");
+
+DEFINE_int32(pld_max_ngram_size,
+             8,
+             "Maximum prompt lookup ngram size. Values below min are raised "
+             "to match min.");
+
 DEFINE_bool(enable_opt_validate_probs,
             false,
             "Whether validate uses selected-only draft_probs [B,S] directly. "

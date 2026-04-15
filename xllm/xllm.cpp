@@ -211,6 +211,8 @@ int run() {
       .pld_stats_log_interval(FLAGS_pld_stats_log_interval)
       .pld_candidate_count(FLAGS_pld_candidate_count)
       .pld_prefer_recent_match(FLAGS_pld_prefer_recent_match)
+      .pld_min_ngram_size(FLAGS_pld_min_ngram_size)
+      .pld_max_ngram_size(FLAGS_pld_max_ngram_size)
       .num_request_handling_threads(FLAGS_num_request_handling_threads)
       .communication_backend(FLAGS_communication_backend)
       .enable_eplb(FLAGS_enable_eplb)

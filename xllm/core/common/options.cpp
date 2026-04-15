@@ -47,6 +47,12 @@ std::string Options::to_string() const {
      << speculative_suffix_max_cached_requests()
      << ", speculative_suffix_use_tree_spec: "
      << speculative_suffix_use_tree_spec()
+     << ", pld_enable_request_stats: " << pld_enable_request_stats()
+     << ", pld_stats_log_interval: " << pld_stats_log_interval()
+     << ", pld_candidate_count: " << pld_candidate_count()
+     << ", pld_prefer_recent_match: " << pld_prefer_recent_match()
+     << ", pld_min_ngram_size: " << pld_min_ngram_size()
+     << ", pld_max_ngram_size: " << pld_max_ngram_size()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")
      << ", rank_tablefile: " << rank_tablefile().value_or("null")
