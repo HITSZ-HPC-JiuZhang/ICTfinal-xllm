@@ -65,6 +65,34 @@ runtime::Options SuffixTargetOptions(const runtime::Options& options) {
 bool is_prompt_lookup_algorithm(const std::string& algo) {
   return algo == "PLD" || algo == "PromptLookup";
 }
+
+void log_pld_decode_summary(uint64_t decode_batches,
+                            uint64_t no_draft_batches,
+                            uint64_t requested_draft_tokens,
+                            uint64_t draft_tokens,
+                            uint64_t accepted_draft_tokens) {
+  constexpr uint64_t kPldSummaryLogInterval = 1024;
+  if (decode_batches == 0 || decode_batches % kPldSummaryLogInterval != 0) {
+    return;
+  }
+
+  const double draft_hit_rate =
+      requested_draft_tokens == 0
+          ? 0.0
+          : static_cast<double>(draft_tokens) /
+                static_cast<double>(requested_draft_tokens);
+  const double accept_rate = draft_tokens == 0
+                                 ? 0.0
+                                 : static_cast<double>(accepted_draft_tokens) /
+                                       static_cast<double>(draft_tokens);
+  LOG(INFO) << "PLD decode summary: batches=" << decode_batches
+            << ", no_draft_batches=" << no_draft_batches
+            << ", requested_draft_tokens=" << requested_draft_tokens
+            << ", drafted_tokens=" << draft_tokens
+            << ", accepted_draft_tokens=" << accepted_draft_tokens
+            << ", draft_hit_rate=" << draft_hit_rate
+            << ", accept_rate=" << accept_rate;
+}
 }  // namespace
 
 SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
@@ -80,15 +108,34 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
   if (use_prompt_lookup_cache_) {
     constexpr int32_t kPromptLookupMinNgramSize = 3;
     constexpr int32_t kPromptLookupMaxNgramSize = 8;
+    if (recent_tokens_max_size_ < kPromptLookupMinNgramSize) {
+      LOG(WARNING) << "PLD recent token history depth "
+                   << recent_tokens_max_size_
+                   << " is smaller than min ngram size "
+                   << kPromptLookupMinNgramSize
+                   << "; clamping history depth to keep PLD effective.";
+      recent_tokens_max_size_ = kPromptLookupMinNgramSize;
+    }
     const int32_t prompt_lookup_max_ngram_size =
         std::max(kPromptLookupMinNgramSize,
                  std::min(kPromptLookupMaxNgramSize, recent_tokens_max_size_));
     prompt_lookup_cache_ = std::make_unique<PromptLookupCache>(
         prompt_lookup_max_ngram_size, kPromptLookupMinNgramSize);
+    LOG(INFO) << "Prompt lookup decoding enabled: rank=" << parallel_args.rank()
+              << ", device=" << device << ", num_speculative_tokens="
+              << options_.num_speculative_tokens() << ", ngram_size=["
+              << kPromptLookupMinNgramSize << ", "
+              << prompt_lookup_max_ngram_size
+              << "], recent_tokens_max_size=" << recent_tokens_max_size_;
   } else {
     suffix_cache_ = std::make_unique<SuffixDecodingCache>(
         options_.speculative_suffix_cache_max_depth(),
         options_.speculative_suffix_max_cached_requests());
+    LOG(INFO) << "Suffix speculative decoding enabled: rank="
+              << parallel_args.rank() << ", device=" << device
+              << ", num_speculative_tokens="
+              << options_.num_speculative_tokens() << ", cache_max_depth="
+              << options_.speculative_suffix_cache_max_depth();
   }
 }
 
@@ -236,8 +283,11 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
+  std::vector<int32_t> draft_token_counts(num_sequences, 0);
   std::vector<std::string> req_ids(num_sequences);
   max_accepted_tokens_per_seq_.assign(num_sequences, num_val_tokens);
+  int32_t total_pld_draft_tokens = 0;
+  int32_t pld_attempted_sequences = 0;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     int32_t fallback_token = input_tokens_slice[seq_id];
@@ -256,14 +306,30 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     }
     req_ids[seq_id] = req_id;
 
+    auto& history = suffix_recent_tokens_[req_id];
+    if (history.empty()) {
+      append_tokens_with_limit(history,
+                               std::span<const int32_t>(&fallback_token, 1),
+                               static_cast<size_t>(recent_tokens_max_size_));
+    }
+
     if (use_prompt_lookup_cache_) {
       if (!prompt_lookup_cache_->has_request(req_id)) {
-        LOG_EVERY_N(WARNING, 100)
-            << "PLD request cache missing during decode, falling back to "
-               "one accepted token for this step, req_id="
-            << req_id;
-        max_accepted_tokens_per_seq_[seq_id] = 1;
-        continue;
+        if (!history.empty()) {
+          prompt_lookup_cache_->start_request(
+              req_id, std::span<const int32_t>(history.data(), history.size()));
+          LOG_EVERY_N(WARNING, 100)
+              << "PLD request cache missing during decode; rebuilt cache "
+                 "from recent token history. req_id="
+              << req_id << ", history_tokens=" << history.size();
+        } else {
+          LOG_EVERY_N(WARNING, 100)
+              << "PLD request cache missing during decode, falling back to "
+                 "one accepted token for this step, req_id="
+              << req_id;
+          max_accepted_tokens_per_seq_[seq_id] = 1;
+          continue;
+        }
       }
     } else if (!suffix_cache_->has_active_request(req_id)) {
       suffix_cache_->start_request(
@@ -274,15 +340,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                                static_cast<size_t>(recent_tokens_max_size_));
     }
 
-    auto& history = suffix_recent_tokens_[req_id];
-    if (history.empty()) {
-      append_tokens_with_limit(history,
-                               std::span<const int32_t>(&fallback_token, 1),
-                               static_cast<size_t>(recent_tokens_max_size_));
-    }
-
     std::vector<int32_t> draft_token_ids;
     if (use_prompt_lookup_cache_) {
+      ++pld_attempted_sequences;
       PromptLookupDraft draft = prompt_lookup_cache_->speculate(
           req_id,
           std::span<const int32_t>(history.data(), history.size()),
@@ -302,13 +362,78 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
     const int32_t fill_count =
         std::min<int32_t>(num_speculative_tokens, draft_token_ids.size());
+    draft_token_counts[seq_id] = fill_count;
     if (use_prompt_lookup_cache_) {
       max_accepted_tokens_per_seq_[seq_id] = fill_count + 1;
+      total_pld_draft_tokens += fill_count;
     }
     for (int32_t i = 0; i < fill_count; ++i) {
       draft_tokens_flat[seq_id * num_speculative_tokens + i] =
           draft_token_ids[i];
     }
+  }
+
+  if (use_prompt_lookup_cache_) {
+    ++pld_decode_batches_;
+    pld_requested_draft_tokens_total_ +=
+        static_cast<uint64_t>(pld_attempted_sequences) *
+        static_cast<uint64_t>(num_speculative_tokens);
+
+    if (total_pld_draft_tokens == 0) {
+      ++pld_no_draft_batches_;
+      COUNTER_ADD(speculative_execution_latency_seconds_draft,
+                  timer.elapsed_seconds());
+
+      timer.reset();
+      auto future = impl_->step_async(input);
+      ForwardOutput output = std::move(future).get().value();
+      COUNTER_ADD(speculative_execution_latency_seconds_target,
+                  timer.elapsed_seconds());
+
+      if (request_ids.size() == static_cast<size_t>(num_sequences)) {
+        torch::Tensor next_tokens =
+            safe_to(output.sample_output.next_tokens, torch::kCPU);
+        if (next_tokens.defined() &&
+            next_tokens.numel() == static_cast<int64_t>(num_sequences)) {
+          next_tokens = next_tokens.view({-1}).to(torch::kInt);
+          Slice<int32_t> next_tokens_slice = {
+              next_tokens.data_ptr<int32_t>(),
+              static_cast<size_t>(next_tokens.numel())};
+          for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+            const std::string req_id = request_ids[seq_id];
+            if (req_id.empty()) {
+              continue;
+            }
+            const int32_t token = next_tokens_slice[seq_id];
+            if (token < 0) {
+              continue;
+            }
+            append_tokens_with_limit(
+                suffix_recent_tokens_[req_id],
+                std::span<const int32_t>(&token, 1),
+                static_cast<size_t>(recent_tokens_max_size_));
+          }
+        }
+      }
+
+      VLOG(1) << "PLD no draft tokens found for current decode batch; using "
+                 "single-token target decode fallback. reqs="
+              << num_sequences
+              << ", recent_tokens_max_size=" << recent_tokens_max_size_;
+      log_pld_decode_summary(pld_decode_batches_,
+                             pld_no_draft_batches_,
+                             pld_requested_draft_tokens_total_,
+                             pld_draft_tokens_total_,
+                             pld_accepted_draft_tokens_total_);
+
+      output.sample_output.embeddings = torch::Tensor();
+      if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+        return std::nullopt;
+      }
+      return output;
+    }
+
+    pld_draft_tokens_total_ += static_cast<uint64_t>(total_pld_draft_tokens);
   }
 
   ForwardInput validate_input;
@@ -364,6 +489,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         accepted_tokens.data_ptr<int32_t>(),
         static_cast<size_t>(accepted_tokens.numel())};
 
+    int32_t accepted_pld_draft_tokens = 0;
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
       const std::string& req_id = req_ids[seq_id];
       if (req_id.empty()) {
@@ -385,6 +511,14 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
           break;
         }
         accepted.emplace_back(token);
+      }
+
+      if (use_prompt_lookup_cache_) {
+        const int32_t accepted_draft_tokens =
+            first_reject_idx < 0 ? num_speculative_tokens
+                                 : std::max(0, first_reject_idx - 1);
+        accepted_pld_draft_tokens +=
+            std::min(accepted_draft_tokens, draft_token_counts[seq_id]);
       }
 
       if (seq_id < 8) {
@@ -415,6 +549,16 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
             std::span<const int32_t>(accepted.data(), accepted.size()),
             static_cast<size_t>(recent_tokens_max_size_));
       }
+    }
+
+    if (use_prompt_lookup_cache_) {
+      pld_accepted_draft_tokens_total_ +=
+          static_cast<uint64_t>(accepted_pld_draft_tokens);
+      log_pld_decode_summary(pld_decode_batches_,
+                             pld_no_draft_batches_,
+                             pld_requested_draft_tokens_total_,
+                             pld_draft_tokens_total_,
+                             pld_accepted_draft_tokens_total_);
     }
   }
 

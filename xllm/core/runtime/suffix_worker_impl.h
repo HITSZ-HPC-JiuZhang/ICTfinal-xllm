@@ -53,6 +53,11 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;
   std::vector<int32_t> max_accepted_tokens_per_seq_;
+  uint64_t pld_decode_batches_ = 0;
+  uint64_t pld_requested_draft_tokens_total_ = 0;
+  uint64_t pld_draft_tokens_total_ = 0;
+  uint64_t pld_accepted_draft_tokens_total_ = 0;
+  uint64_t pld_no_draft_batches_ = 0;
   int32_t recent_tokens_max_size_ = 0;
   bool use_prompt_lookup_cache_ = false;
 };
