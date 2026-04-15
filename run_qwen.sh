@@ -1,6 +1,8 @@
 #!/bin/bash
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 rm -rf core.*
 
 if [[ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]]; then
@@ -17,6 +19,7 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export HCCL_IF_BASE_PORT="${HCCL_IF_BASE_PORT:-43432}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/nvme0/models/Qwen3.5/Qwen3.5-9B}"
+XLLM_BIN="${XLLM_BIN:-$SCRIPT_DIR/build/xllm/core/server/xllm}"
 MASTER_NODE_ADDR="${MASTER_NODE_ADDR:-127.0.0.1:9748}"
 START_PORT="${START_PORT:-18000}"
 START_DEVICE="${START_DEVICE:-0}"
@@ -72,6 +75,13 @@ for ((i = 0; i < NNODES; i++)); do
   fi
   LAUNCH_DEVICES[$i]="$device_id"
 done
+
+if [[ ! -f "$XLLM_BIN" || ! -x "$XLLM_BIN" ]]; then
+  echo "[ERROR] xLLM binary is not executable: $XLLM_BIN"
+  echo "[ERROR] Set XLLM_BIN to the binary built from this source tree."
+  exit 1
+fi
+XLLM_BIN_RESOLVED="$(realpath "$XLLM_BIN")"
 
 if [[ -f "$MODEL_PATH/model.safetensors.index.json" ]]; then
   echo "[INFO] Checking model shard completeness via model.safetensors.index.json"
@@ -138,6 +148,8 @@ fi
 
 echo "[INFO] Launching xllm nodes..."
 echo "[INFO] MODEL_PATH=$MODEL_PATH"
+echo "[INFO] XLLM_BIN=$XLLM_BIN"
+echo "[INFO] XLLM_BIN_RESOLVED=$XLLM_BIN_RESOLVED"
 echo "[INFO] NNODES=$NNODES ENABLE_SHM=$ENABLE_SHM PREWARM_NPU=$PREWARM_NPU ASCEND_RT_VISIBLE_DEVICES=$ASCEND_RT_VISIBLE_DEVICES"
 echo "[INFO] LAUNCH_DEVICES=$(IFS=,; echo "${LAUNCH_DEVICES[*]}") START_DEVICE=$START_DEVICE"
 echo "[INFO] MAX_TOKENS_PER_BATCH=$MAX_TOKENS_PER_BATCH MAX_SEQS_PER_BATCH=$MAX_SEQS_PER_BATCH"
@@ -152,7 +164,7 @@ for ((i = 0; i < NNODES; i++)); do
   DEVICE="${LAUNCH_DEVICES[$i]}"
   LOG_FILE="$LOG_DIR/node_$i.log"
 
-  /home/kuma/project/ict-final/xllm/build/xllm/core/server/xllm \
+  "$XLLM_BIN" \
     --model="$MODEL_PATH" \
     --devices="npu:$DEVICE" \
     --port "$PORT" \

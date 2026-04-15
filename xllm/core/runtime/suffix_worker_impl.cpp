@@ -516,7 +516,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       if (use_prompt_lookup_cache_) {
         const int32_t accepted_draft_tokens =
             first_reject_idx < 0 ? num_speculative_tokens
-                                 : std::max(0, first_reject_idx - 1);
+                                 : std::max(0, first_reject_idx);
         accepted_pld_draft_tokens +=
             std::min(accepted_draft_tokens, draft_token_counts[seq_id]);
       }
