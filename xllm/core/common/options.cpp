@@ -53,6 +53,12 @@ std::string Options::to_string() const {
      << ", pld_prefer_recent_match: " << pld_prefer_recent_match()
      << ", pld_min_ngram_size: " << pld_min_ngram_size()
      << ", pld_max_ngram_size: " << pld_max_ngram_size()
+     << ", pld_enable_adaptive: " << pld_enable_adaptive()
+     << ", pld_adaptive_window_size: " << pld_adaptive_window_size()
+     << ", pld_adaptive_disable_steps: " << pld_adaptive_disable_steps()
+     << ", pld_adaptive_min_draft_hit_rate: "
+     << pld_adaptive_min_draft_hit_rate()
+     << ", pld_adaptive_min_accept_rate: " << pld_adaptive_min_accept_rate()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")
      << ", rank_tablefile: " << rank_tablefile().value_or("null")

@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -58,9 +59,30 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
     uint64_t validate_waste_tokens = 0;
   };
 
+  struct PldAdaptiveSample {
+    int32_t requested_draft_tokens = 0;
+    int32_t drafted_tokens = 0;
+    int32_t accepted_draft_tokens = 0;
+  };
+
+  struct PldAdaptiveState {
+    int32_t cooldown_steps = 0;
+    uint64_t window_requested_draft_tokens = 0;
+    uint64_t window_drafted_tokens = 0;
+    uint64_t window_accepted_draft_tokens = 0;
+    std::deque<PldAdaptiveSample> window_samples;
+  };
+
   void ensure_pld_request_stats(const std::string& req_id);
 
   void log_pld_request_stats(const std::string& req_id) const;
+  bool pld_adaptive_enabled() const;
+  int32_t get_pld_adaptive_draft_budget(const std::string& req_id,
+                                        int32_t max_spec_tokens);
+  void update_pld_adaptive_state(const std::string& req_id,
+                                 int32_t requested_draft_tokens,
+                                 int32_t drafted_tokens,
+                                 int32_t accepted_draft_tokens);
   void cleanup_inactive_requests(
       const std::unordered_set<std::string>& current_req_ids);
   void flush_all_pld_requests();
@@ -69,6 +91,7 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
   std::unique_ptr<PromptLookupCache> prompt_lookup_cache_;
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
   std::unordered_map<std::string, PldRequestStats> pld_request_stats_;
+  std::unordered_map<std::string, PldAdaptiveState> pld_adaptive_states_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;
   std::vector<int32_t> max_accepted_tokens_per_seq_;
   uint64_t pld_decode_batches_ = 0;

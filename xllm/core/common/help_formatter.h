@@ -90,7 +90,12 @@ const OptionCategory kMtpOptions = {"SPECULATIVE OPTIONS",
                                      "pld_candidate_count",
                                      "pld_prefer_recent_match",
                                      "pld_min_ngram_size",
-                                     "pld_max_ngram_size"}};
+                                     "pld_max_ngram_size",
+                                     "pld_enable_adaptive",
+                                     "pld_adaptive_window_size",
+                                     "pld_adaptive_disable_steps",
+                                     "pld_adaptive_min_draft_hit_rate",
+                                     "pld_adaptive_min_accept_rate"}};
 
 const OptionCategory kXllmServiceOptions = {
     "XLLM-SERVICE OPTIONS",

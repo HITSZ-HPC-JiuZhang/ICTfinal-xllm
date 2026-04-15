@@ -425,6 +425,30 @@ DEFINE_int32(pld_max_ngram_size,
              "Maximum prompt lookup ngram size. Values below min are raised "
              "to match min.");
 
+DEFINE_bool(pld_enable_adaptive,
+            false,
+            "Whether prompt lookup decoding adaptively disables draft lookup "
+            "for requests with low recent PLD efficiency.");
+
+DEFINE_int32(pld_adaptive_window_size,
+             16,
+             "Prompt lookup adaptive control window size in decode steps.");
+
+DEFINE_int32(pld_adaptive_disable_steps,
+             16,
+             "Decode steps to skip prompt lookup after adaptive PLD control "
+             "detects low efficiency.");
+
+DEFINE_double(pld_adaptive_min_draft_hit_rate,
+              0.1,
+              "Minimum recent PLD drafted/requested token rate before "
+              "adaptive control disables prompt lookup temporarily.");
+
+DEFINE_double(pld_adaptive_min_accept_rate,
+              0.5,
+              "Minimum recent PLD accepted/drafted token rate before adaptive "
+              "control disables prompt lookup temporarily.");
+
 DEFINE_bool(enable_opt_validate_probs,
             false,
             "Whether validate uses selected-only draft_probs [B,S] directly. "

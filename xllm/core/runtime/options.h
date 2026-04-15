@@ -89,6 +89,16 @@ struct Options {
 
   PROPERTY(int32_t, pld_max_ngram_size) = 8;
 
+  PROPERTY(bool, pld_enable_adaptive) = false;
+
+  PROPERTY(int32_t, pld_adaptive_window_size) = 16;
+
+  PROPERTY(int32_t, pld_adaptive_disable_steps) = 16;
+
+  PROPERTY(double, pld_adaptive_min_draft_hit_rate) = 0.1;
+
+  PROPERTY(double, pld_adaptive_min_accept_rate) = 0.5;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 

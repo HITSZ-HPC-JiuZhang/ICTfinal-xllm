@@ -150,6 +150,15 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
               << prompt_lookup_min_ngram_size << ", "
               << prompt_lookup_max_ngram_size
               << "], recent_tokens_max_size=" << recent_tokens_max_size_;
+    if (pld_adaptive_enabled()) {
+      LOG(INFO) << "PLD adaptive control enabled: window_size="
+                << options_.pld_adaptive_window_size()
+                << ", disable_steps=" << options_.pld_adaptive_disable_steps()
+                << ", min_draft_hit_rate="
+                << options_.pld_adaptive_min_draft_hit_rate()
+                << ", min_accept_rate="
+                << options_.pld_adaptive_min_accept_rate();
+    }
   } else {
     suffix_cache_ = std::make_unique<SuffixDecodingCache>(
         options_.speculative_suffix_cache_max_depth(),
@@ -215,6 +224,93 @@ void SuffixWorkerImpl::log_pld_request_stats(const std::string& req_id) const {
             << ", validate_waste_tokens=" << stats.validate_waste_tokens;
 }
 
+bool SuffixWorkerImpl::pld_adaptive_enabled() const {
+  return use_prompt_lookup_cache_ && options_.pld_enable_adaptive() &&
+         options_.pld_adaptive_window_size() > 0 &&
+         options_.pld_adaptive_disable_steps() > 0;
+}
+
+int32_t SuffixWorkerImpl::get_pld_adaptive_draft_budget(
+    const std::string& req_id,
+    int32_t max_spec_tokens) {
+  if (!pld_adaptive_enabled()) {
+    return max_spec_tokens;
+  }
+
+  PldAdaptiveState& state = pld_adaptive_states_[req_id];
+  if (state.cooldown_steps <= 0) {
+    return max_spec_tokens;
+  }
+
+  --state.cooldown_steps;
+  return 0;
+}
+
+void SuffixWorkerImpl::update_pld_adaptive_state(
+    const std::string& req_id,
+    int32_t requested_draft_tokens,
+    int32_t drafted_tokens,
+    int32_t accepted_draft_tokens) {
+  if (!pld_adaptive_enabled() || requested_draft_tokens <= 0) {
+    return;
+  }
+
+  PldAdaptiveState& state = pld_adaptive_states_[req_id];
+  PldAdaptiveSample sample;
+  sample.requested_draft_tokens = requested_draft_tokens;
+  sample.drafted_tokens = drafted_tokens;
+  sample.accepted_draft_tokens = accepted_draft_tokens;
+  state.window_samples.emplace_back(sample);
+  state.window_requested_draft_tokens +=
+      static_cast<uint64_t>(requested_draft_tokens);
+  state.window_drafted_tokens += static_cast<uint64_t>(drafted_tokens);
+  state.window_accepted_draft_tokens +=
+      static_cast<uint64_t>(accepted_draft_tokens);
+
+  const size_t window_size =
+      static_cast<size_t>(options_.pld_adaptive_window_size());
+  while (state.window_samples.size() > window_size) {
+    const PldAdaptiveSample& old_sample = state.window_samples.front();
+    state.window_requested_draft_tokens -=
+        static_cast<uint64_t>(old_sample.requested_draft_tokens);
+    state.window_drafted_tokens -=
+        static_cast<uint64_t>(old_sample.drafted_tokens);
+    state.window_accepted_draft_tokens -=
+        static_cast<uint64_t>(old_sample.accepted_draft_tokens);
+    state.window_samples.pop_front();
+  }
+  if (state.window_samples.size() < window_size) {
+    return;
+  }
+
+  const double draft_hit_rate =
+      state.window_requested_draft_tokens == 0
+          ? 0.0
+          : static_cast<double>(state.window_drafted_tokens) /
+                static_cast<double>(state.window_requested_draft_tokens);
+  const double accept_rate =
+      state.window_drafted_tokens == 0
+          ? 0.0
+          : static_cast<double>(state.window_accepted_draft_tokens) /
+                static_cast<double>(state.window_drafted_tokens);
+  if (draft_hit_rate >= options_.pld_adaptive_min_draft_hit_rate() &&
+      accept_rate >= options_.pld_adaptive_min_accept_rate()) {
+    return;
+  }
+
+  state.cooldown_steps = options_.pld_adaptive_disable_steps();
+  LOG(INFO) << "PLD adaptive control disabled prompt lookup temporarily: "
+            << "req_id=" << req_id
+            << ", cooldown_steps=" << state.cooldown_steps
+            << ", window_size=" << window_size
+            << ", draft_hit_rate=" << draft_hit_rate
+            << ", accept_rate=" << accept_rate;
+  state.window_samples.clear();
+  state.window_requested_draft_tokens = 0;
+  state.window_drafted_tokens = 0;
+  state.window_accepted_draft_tokens = 0;
+}
+
 void SuffixWorkerImpl::cleanup_inactive_requests(
     const std::unordered_set<std::string>& current_req_ids) {
   for (const std::string& req_id : suffix_active_decode_req_ids_) {
@@ -226,6 +322,7 @@ void SuffixWorkerImpl::cleanup_inactive_requests(
       log_pld_request_stats(req_id);
       prompt_lookup_cache_->stop_request(req_id);
       pld_request_stats_.erase(req_id);
+      pld_adaptive_states_.erase(req_id);
     } else if (suffix_cache_->has_active_request(req_id)) {
       suffix_cache_->stop_request(req_id);
     }
@@ -243,6 +340,7 @@ void SuffixWorkerImpl::flush_all_pld_requests() {
       }
     }
     pld_request_stats_.clear();
+    pld_adaptive_states_.clear();
   } else if (suffix_cache_ != nullptr) {
     for (const std::string& req_id : suffix_active_decode_req_ids_) {
       if (suffix_cache_->has_active_request(req_id)) {
@@ -397,12 +495,13 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
   std::vector<int32_t> draft_token_counts(num_sequences, 0);
+  std::vector<int32_t> pld_requested_draft_counts(num_sequences, 0);
   std::vector<int32_t> validate_token_counts(num_sequences, num_val_tokens);
   std::vector<std::string> req_ids(num_sequences);
   max_accepted_tokens_per_seq_.assign(
       num_sequences, use_prompt_lookup_cache_ ? 1 : num_val_tokens);
   int32_t total_pld_draft_tokens = 0;
-  int32_t pld_attempted_sequences = 0;
+  int32_t pld_requested_draft_tokens_batch = 0;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     int32_t fallback_token = input_tokens_slice[seq_id];
@@ -458,11 +557,26 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
     std::vector<int32_t> draft_token_ids;
     if (use_prompt_lookup_cache_) {
-      ++pld_attempted_sequences;
+      const int32_t requested_draft_tokens =
+          get_pld_adaptive_draft_budget(req_id, num_speculative_tokens);
+      pld_requested_draft_counts[seq_id] = requested_draft_tokens;
+      pld_requested_draft_tokens_batch += requested_draft_tokens;
+      if (requested_draft_tokens <= 0) {
+        if (enable_variable_pld_validate) {
+          validate_token_counts[seq_id] = 1;
+        }
+        max_accepted_tokens_per_seq_[seq_id] = 1;
+        if (enable_pld_request_stats) {
+          PldRequestStats& stats = pld_request_stats_[req_id];
+          ++stats.decode_sequence_steps;
+          ++stats.no_draft_sequence_steps;
+        }
+        continue;
+      }
       PromptLookupDraft draft = prompt_lookup_cache_->speculate(
           req_id,
           std::span<const int32_t>(history.data(), history.size()),
-          num_speculative_tokens,
+          requested_draft_tokens,
           options_.pld_candidate_count(),
           options_.pld_prefer_recent_match());
       draft_token_ids = std::move(draft.token_ids);
@@ -491,7 +605,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         PldRequestStats& stats = pld_request_stats_[req_id];
         ++stats.decode_sequence_steps;
         stats.requested_draft_tokens +=
-            static_cast<uint64_t>(num_speculative_tokens);
+            static_cast<uint64_t>(pld_requested_draft_counts[seq_id]);
         stats.drafted_tokens += static_cast<uint64_t>(fill_count);
         if (fill_count == 0) {
           ++stats.no_draft_sequence_steps;
@@ -507,10 +621,19 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   if (use_prompt_lookup_cache_) {
     ++pld_decode_batches_;
     pld_requested_draft_tokens_total_ +=
-        static_cast<uint64_t>(pld_attempted_sequences) *
-        static_cast<uint64_t>(num_speculative_tokens);
+        static_cast<uint64_t>(pld_requested_draft_tokens_batch);
 
     if (total_pld_draft_tokens == 0) {
+      for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+        const std::string& req_id = req_ids[seq_id];
+        if (req_id.empty()) {
+          continue;
+        }
+        update_pld_adaptive_state(req_id,
+                                  pld_requested_draft_counts[seq_id],
+                                  draft_token_counts[seq_id],
+                                  /*accepted_draft_tokens=*/0);
+      }
       ++pld_no_draft_batches_;
       COUNTER_ADD(speculative_execution_latency_seconds_draft,
                   timer.elapsed_seconds());
@@ -572,9 +695,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         if (req_id.empty()) {
           continue;
         }
+        const int32_t validate_draft_capacity =
+            enable_variable_pld_validate ? pld_requested_draft_counts[seq_id]
+                                         : num_speculative_tokens;
         pld_request_stats_[req_id].validate_waste_tokens +=
-            static_cast<uint64_t>(num_speculative_tokens -
-                                  draft_token_counts[seq_id]);
+            static_cast<uint64_t>(std::max(
+                0, validate_draft_capacity - draft_token_counts[seq_id]));
       }
     }
   }
@@ -705,6 +831,10 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         const int32_t bounded_accepted_draft_tokens =
             std::min(accepted_draft_tokens, draft_token_counts[seq_id]);
         accepted_pld_draft_tokens += bounded_accepted_draft_tokens;
+        update_pld_adaptive_state(req_id,
+                                  pld_requested_draft_counts[seq_id],
+                                  draft_token_counts[seq_id],
+                                  bounded_accepted_draft_tokens);
         if (enable_pld_request_stats) {
           pld_request_stats_[req_id].accepted_draft_tokens +=
               static_cast<uint64_t>(bounded_accepted_draft_tokens);

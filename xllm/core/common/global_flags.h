@@ -94,6 +94,16 @@ DECLARE_int32(pld_min_ngram_size);
 
 DECLARE_int32(pld_max_ngram_size);
 
+DECLARE_bool(pld_enable_adaptive);
+
+DECLARE_int32(pld_adaptive_window_size);
+
+DECLARE_int32(pld_adaptive_disable_steps);
+
+DECLARE_double(pld_adaptive_min_draft_hit_rate);
+
+DECLARE_double(pld_adaptive_min_accept_rate);
+
 DECLARE_int32(num_request_handling_threads);
 
 DECLARE_int32(num_response_handling_threads);

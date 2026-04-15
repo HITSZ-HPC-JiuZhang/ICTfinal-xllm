@@ -76,6 +76,15 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::pld_prefer_recent_match_)
       .def_readwrite("pld_min_ngram_size", &Options::pld_min_ngram_size_)
       .def_readwrite("pld_max_ngram_size", &Options::pld_max_ngram_size_)
+      .def_readwrite("pld_enable_adaptive", &Options::pld_enable_adaptive_)
+      .def_readwrite("pld_adaptive_window_size",
+                     &Options::pld_adaptive_window_size_)
+      .def_readwrite("pld_adaptive_disable_steps",
+                     &Options::pld_adaptive_disable_steps_)
+      .def_readwrite("pld_adaptive_min_draft_hit_rate",
+                     &Options::pld_adaptive_min_draft_hit_rate_)
+      .def_readwrite("pld_adaptive_min_accept_rate",
+                     &Options::pld_adaptive_min_accept_rate_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)
       .def_readwrite("communication_backend", &Options::communication_backend_)
