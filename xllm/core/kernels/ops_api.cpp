@@ -18,6 +18,7 @@ limitations under the License.
 #if defined(USE_MLU)
 #include "mlu/mlu_ops_api.h"
 #elif defined(USE_NPU)
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "npu/npu_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
 #elif defined(USE_CUDA)
@@ -30,10 +31,83 @@ limitations under the License.
 #include "musa/musa_ops_api.h"
 #endif
 
+#include <algorithm>
+#include <array>
 #include <numeric>
 
 #include "common/macros.h"
 #include "layers/common/attention_metadata.h"
+
+namespace {
+
+bool supports_tilelang_fused_gdn_gating(
+    const xllm::kernel::FusedGdnGatingParams& params) {
+#if defined(USE_NPU)
+  static const std::array<int64_t, 8> kSupportedHeadCounts = {
+      4, 6, 8, 12, 16, 24, 32, 48};
+  static const std::array<int64_t, 2> kSupportedLargeHeadCounts = {64, 128};
+
+  if (!params.A_log.defined() || !params.a.defined() || !params.b.defined() ||
+      !params.dt_bias.defined()) {
+    return false;
+  }
+
+  if (params.A_log.device().type() != c10::DeviceType::PrivateUse1 ||
+      params.a.device().type() != c10::DeviceType::PrivateUse1 ||
+      params.b.device().type() != c10::DeviceType::PrivateUse1 ||
+      params.dt_bias.device().type() != c10::DeviceType::PrivateUse1) {
+    return false;
+  }
+
+  if (params.A_log.dim() != 1 || params.dt_bias.dim() != 1 ||
+      params.a.dim() != 2 || params.b.dim() != 2) {
+    return false;
+  }
+
+  if (params.a.sizes() != params.b.sizes() ||
+      params.A_log.size(0) != params.a.size(1) ||
+      params.dt_bias.size(0) != params.a.size(1)) {
+    return false;
+  }
+
+  const int64_t num_heads = params.a.size(1);
+  if (num_heads <= 0 || num_heads > 128) {
+    return false;
+  }
+
+  const bool is_small_supported =
+      std::find(kSupportedHeadCounts.begin(),
+                kSupportedHeadCounts.end(),
+                num_heads) != kSupportedHeadCounts.end();
+  const bool is_large_supported =
+      std::find(kSupportedLargeHeadCounts.begin(),
+                kSupportedLargeHeadCounts.end(),
+                num_heads) != kSupportedLargeHeadCounts.end();
+  if (!is_small_supported && !is_large_supported) {
+    return false;
+  }
+
+  if (params.A_log.dtype() != torch::kFloat32 ||
+      params.dt_bias.dtype() != torch::kFloat32 ||
+      params.a.dtype() != torch::kBFloat16 ||
+      params.b.dtype() != torch::kBFloat16) {
+    return false;
+  }
+
+  if (!params.A_log.is_contiguous() || !params.dt_bias.is_contiguous() ||
+      params.a.stride(1) != 1 || params.b.stride(1) != 1 ||
+      params.a.stride(0) <= 0 || params.b.stride(0) <= 0) {
+    return false;
+  }
+
+  return true;
+#else
+  (void)params;
+  return false;
+#endif
+}
+
+}  // namespace
 
 namespace xllm::kernel {
 
@@ -786,6 +860,14 @@ std::tuple<torch::Tensor, torch::Tensor> fp8_scaled_quantize(
 std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
     FusedGdnGatingParams& params) {
 #if defined(USE_NPU)
+  if (supports_tilelang_fused_gdn_gating(params)) {
+    return npu::tilelang::fused_gdn_gating(params.A_log,
+                                           params.a,
+                                           params.b,
+                                           params.dt_bias,
+                                           params.beta,
+                                           params.threshold);
+  }
   return npu::npu_fused_gdn_gating(params.A_log,
                                    params.a,
                                    params.b,
