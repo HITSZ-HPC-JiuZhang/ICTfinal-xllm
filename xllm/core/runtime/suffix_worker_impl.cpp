@@ -449,7 +449,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       PromptLookupDraft draft = prompt_lookup_cache_->speculate(
           req_id,
           std::span<const int32_t>(history.data(), history.size()),
-          num_speculative_tokens);
+          num_speculative_tokens,
+          options_.pld_candidate_count(),
+          options_.pld_prefer_recent_match());
       draft_token_ids = std::move(draft.token_ids);
     } else {
       SuffixDecodingDraft draft = suffix_cache_->speculate(

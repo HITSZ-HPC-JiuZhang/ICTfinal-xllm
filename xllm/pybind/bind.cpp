@@ -71,6 +71,9 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::pld_enable_request_stats_)
       .def_readwrite("pld_stats_log_interval",
                      &Options::pld_stats_log_interval_)
+      .def_readwrite("pld_candidate_count", &Options::pld_candidate_count_)
+      .def_readwrite("pld_prefer_recent_match",
+                     &Options::pld_prefer_recent_match_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)
       .def_readwrite("communication_backend", &Options::communication_backend_)

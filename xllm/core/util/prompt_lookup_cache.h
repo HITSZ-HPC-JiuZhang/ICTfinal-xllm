@@ -44,12 +44,15 @@ class PromptLookupCache {
 
   PromptLookupDraft speculate(const std::string& req_id,
                               std::span<const int32_t> context,
-                              int32_t max_spec_tokens) const;
+                              int32_t max_spec_tokens,
+                              int32_t candidate_count = 1,
+                              bool prefer_recent_match = false) const;
 
  private:
   struct RequestCache {
     std::vector<int32_t> prompt_token_ids;
     std::unordered_map<uint64_t, std::vector<int32_t>> ngram_index;
+    std::unordered_map<uint64_t, int32_t> continuation_prefix_counts;
   };
 
   uint64_t hash_tokens(std::span<const int32_t> tokens) const;
@@ -63,13 +66,17 @@ class PromptLookupCache {
 
   void index_new_prompt_tokens(RequestCache& request, int32_t old_size);
 
+  void index_new_continuation_prefixes(RequestCache& request, int32_t old_size);
+
   bool matches_at(const RequestCache& request,
                   std::span<const int32_t> context,
                   int32_t context_start,
                   int32_t prompt_start,
                   int32_t len) const;
 
- private:
+  int32_t count_continuation_prefix_reuse(const RequestCache& request,
+                                          int32_t draft_start,
+                                          int32_t draft_len) const;
   int32_t max_ngram_size_;
   int32_t min_ngram_size_;
   std::unordered_map<std::string, RequestCache> requests_;

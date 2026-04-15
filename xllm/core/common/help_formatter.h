@@ -86,7 +86,9 @@ const OptionCategory kMtpOptions = {"SPECULATIVE OPTIONS",
                                      "speculative_suffix_max_cached_requests",
                                      "speculative_suffix_use_tree_spec",
                                      "pld_enable_request_stats",
-                                     "pld_stats_log_interval"}};
+                                     "pld_stats_log_interval",
+                                     "pld_candidate_count",
+                                     "pld_prefer_recent_match"}};
 
 const OptionCategory kXllmServiceOptions = {
     "XLLM-SERVICE OPTIONS",

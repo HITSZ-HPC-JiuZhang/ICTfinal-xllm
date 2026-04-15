@@ -81,6 +81,10 @@ struct Options {
 
   PROPERTY(int32_t, pld_stats_log_interval) = 1024;
 
+  PROPERTY(int32_t, pld_candidate_count) = 1;
+
+  PROPERTY(bool, pld_prefer_recent_match) = false;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 

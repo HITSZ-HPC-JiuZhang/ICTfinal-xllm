@@ -406,6 +406,16 @@ DEFINE_int32(pld_stats_log_interval,
              "Prompt lookup decoding batch summary log interval. Set 0 to "
              "disable periodic batch summaries.");
 
+DEFINE_int32(pld_candidate_count,
+             1,
+             "Maximum prompt lookup candidates scored per match length. "
+             "Values above 16 are clamped.");
+
+DEFINE_bool(pld_prefer_recent_match,
+            false,
+            "Whether prompt lookup decoding prefers more recent prompt "
+            "matches when continuation lengths tie.");
+
 DEFINE_bool(enable_opt_validate_probs,
             false,
             "Whether validate uses selected-only draft_probs [B,S] directly. "

@@ -74,4 +74,117 @@ TEST(PromptLookupCacheTest, PrefersLongestContinuationOverLatestMatch) {
   EXPECT_EQ(draft.token_ids, std::vector<int32_t>({4, 5, 6, 7}));
 }
 
+TEST(PromptLookupCacheTest, PrefersRecentMatchWhenContinuationLengthTies) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 7, 8, 1, 2, 3, 9, 10};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/4,
+                                            /*prefer_recent_match=*/true);
+
+  EXPECT_EQ(draft.match_len, 3);
+  EXPECT_EQ(draft.token_ids, std::vector<int32_t>({9, 10}));
+}
+
+TEST(PromptLookupCacheTest, FallsBackToEarlierMatchWhenRecentPreferenceOff) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 7, 8, 1, 2, 3, 9, 10};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/4,
+                                            /*prefer_recent_match=*/false);
+
+  EXPECT_EQ(draft.match_len, 3);
+  EXPECT_EQ(draft.token_ids, std::vector<int32_t>({7, 8}));
+}
+
+TEST(PromptLookupCacheTest, CandidateCountOnePreservesLegacySelection) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 7, 8, 1, 2, 3, 9, 10};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/1,
+                                            /*prefer_recent_match=*/false);
+
+  EXPECT_EQ(draft.match_len, 3);
+  EXPECT_EQ(draft.token_ids, std::vector<int32_t>({7, 8}));
+}
+
+TEST(PromptLookupCacheTest, ConsidersMatchesBeyondCandidateWindow) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1,  2,  3, 10, 11, 1,  2,  3, 12, 13, 1,  2, 3,
+                                 14, 15, 1, 2,  3,  16, 17, 1, 2,  3,  18, 19};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/4,
+                                            /*prefer_recent_match=*/true);
+
+  EXPECT_EQ(draft.match_len, 3);
+  EXPECT_EQ(draft.token_ids, std::vector<int32_t>({18, 19}));
+}
+
+TEST(PromptLookupCacheTest, ReturnsEmptyDraftForInvalidCandidateCount) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 4, 5};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/0,
+                                            /*prefer_recent_match=*/true);
+
+  EXPECT_EQ(draft.match_len, 0);
+  EXPECT_TRUE(draft.token_ids.empty());
+}
+
+TEST(PromptLookupCacheTest, ReuseScoreOnlyUsesDraftedTokens) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 4, 9, 4, 1, 2, 3, 5, 8, 5, 8};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/1,
+                                            /*candidate_count=*/4,
+                                            /*prefer_recent_match=*/false);
+
+  EXPECT_EQ(draft.match_len, 3);
+  EXPECT_EQ(draft.token_ids, std::vector<int32_t>({4}));
+}
+
+TEST(PromptLookupCacheTest, ReturnsEmptyDraftForNegativeCandidateCount) {
+  PromptLookupCache cache(/*max_ngram_size=*/3, /*min_ngram_size=*/3);
+  std::vector<int32_t> prompt = {1, 2, 3, 4, 5};
+  cache.start_request("req", std::span<const int32_t>(prompt));
+
+  std::vector<int32_t> context = {1, 2, 3};
+  PromptLookupDraft draft = cache.speculate("req",
+                                            std::span<const int32_t>(context),
+                                            /*max_spec_tokens=*/2,
+                                            /*candidate_count=*/-1,
+                                            /*prefer_recent_match=*/true);
+
+  EXPECT_EQ(draft.match_len, 0);
+  EXPECT_TRUE(draft.token_ids.empty());
+}
+
 }  // namespace xllm
