@@ -84,7 +84,9 @@ const OptionCategory kMtpOptions = {"SPECULATIVE OPTIONS",
                                      "speculative_suffix_max_spec_offset",
                                      "speculative_suffix_min_token_prob",
                                      "speculative_suffix_max_cached_requests",
-                                     "speculative_suffix_use_tree_spec"}};
+                                     "speculative_suffix_use_tree_spec",
+                                     "pld_enable_request_stats",
+                                     "pld_stats_log_interval"}};
 
 const OptionCategory kXllmServiceOptions = {
     "XLLM-SERVICE OPTIONS",

@@ -67,6 +67,10 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::speculative_suffix_max_cached_requests_)
       .def_readwrite("speculative_suffix_use_tree_spec",
                      &Options::speculative_suffix_use_tree_spec_)
+      .def_readwrite("pld_enable_request_stats",
+                     &Options::pld_enable_request_stats_)
+      .def_readwrite("pld_stats_log_interval",
+                     &Options::pld_stats_log_interval_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)
       .def_readwrite("communication_backend", &Options::communication_backend_)

@@ -34,7 +34,7 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
                    const torch::Device& device,
                    const runtime::Options& options);
 
-  ~SuffixWorkerImpl() override = default;
+  ~SuffixWorkerImpl() override;
 
  protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
@@ -47,10 +47,26 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
                         const torch::Tensor& draft_probs,
                         const ForwardOutput& target_output);
 
- private:
+  struct PldRequestStats {
+    uint64_t decode_sequence_steps = 0;
+    uint64_t no_draft_sequence_steps = 0;
+    uint64_t requested_draft_tokens = 0;
+    uint64_t drafted_tokens = 0;
+    uint64_t accepted_draft_tokens = 0;
+    uint64_t validate_waste_tokens = 0;
+  };
+
+  void ensure_pld_request_stats(const std::string& req_id);
+
+  void log_pld_request_stats(const std::string& req_id) const;
+  void cleanup_inactive_requests(
+      const std::unordered_set<std::string>& current_req_ids);
+  void flush_all_pld_requests();
+
   std::unique_ptr<SuffixDecodingCache> suffix_cache_;
   std::unique_ptr<PromptLookupCache> prompt_lookup_cache_;
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
+  std::unordered_map<std::string, PldRequestStats> pld_request_stats_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;
   std::vector<int32_t> max_accepted_tokens_per_seq_;
   uint64_t pld_decode_batches_ = 0;

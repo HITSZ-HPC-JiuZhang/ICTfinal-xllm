@@ -207,6 +207,8 @@ int run() {
       .speculative_suffix_max_cached_requests(
           FLAGS_speculative_suffix_max_cached_requests)
       .speculative_suffix_use_tree_spec(FLAGS_speculative_suffix_use_tree_spec)
+      .pld_enable_request_stats(FLAGS_pld_enable_request_stats)
+      .pld_stats_log_interval(FLAGS_pld_stats_log_interval)
       .num_request_handling_threads(FLAGS_num_request_handling_threads)
       .communication_backend(FLAGS_communication_backend)
       .enable_eplb(FLAGS_enable_eplb)

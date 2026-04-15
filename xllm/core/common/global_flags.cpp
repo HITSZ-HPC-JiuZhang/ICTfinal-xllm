@@ -397,6 +397,15 @@ DEFINE_bool(speculative_suffix_use_tree_spec,
             "Whether to use tree-based suffix speculation instead of path "
             "speculation.");
 
+DEFINE_bool(pld_enable_request_stats,
+            false,
+            "Whether prompt lookup decoding emits request-level statistics.");
+
+DEFINE_int32(pld_stats_log_interval,
+             1024,
+             "Prompt lookup decoding batch summary log interval. Set 0 to "
+             "disable periodic batch summaries.");
+
 DEFINE_bool(enable_opt_validate_probs,
             false,
             "Whether validate uses selected-only draft_probs [B,S] directly. "

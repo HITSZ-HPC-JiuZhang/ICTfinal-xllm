@@ -82,6 +82,10 @@ DECLARE_int32(speculative_suffix_max_cached_requests);
 
 DECLARE_bool(speculative_suffix_use_tree_spec);
 
+DECLARE_bool(pld_enable_request_stats);
+
+DECLARE_int32(pld_stats_log_interval);
+
 DECLARE_int32(num_request_handling_threads);
 
 DECLARE_int32(num_response_handling_threads);

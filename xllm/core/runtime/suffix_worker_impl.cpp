@@ -69,26 +69,27 @@ bool is_prompt_lookup_algorithm(const std::string& algo) {
 void log_pld_decode_summary(uint64_t decode_batches,
                             uint64_t no_draft_batches,
                             uint64_t requested_draft_tokens,
-                            uint64_t draft_tokens,
-                            uint64_t accepted_draft_tokens) {
-  constexpr uint64_t kPldSummaryLogInterval = 1024;
-  if (decode_batches == 0 || decode_batches % kPldSummaryLogInterval != 0) {
+                            uint64_t drafted_tokens,
+                            uint64_t accepted_draft_tokens,
+                            int32_t log_interval) {
+  if (log_interval <= 0 || decode_batches == 0 ||
+      decode_batches % static_cast<uint64_t>(log_interval) != 0) {
     return;
   }
 
   const double draft_hit_rate =
       requested_draft_tokens == 0
           ? 0.0
-          : static_cast<double>(draft_tokens) /
+          : static_cast<double>(drafted_tokens) /
                 static_cast<double>(requested_draft_tokens);
-  const double accept_rate = draft_tokens == 0
+  const double accept_rate = drafted_tokens == 0
                                  ? 0.0
                                  : static_cast<double>(accepted_draft_tokens) /
-                                       static_cast<double>(draft_tokens);
+                                       static_cast<double>(drafted_tokens);
   LOG(INFO) << "PLD decode summary: batches=" << decode_batches
             << ", no_draft_batches=" << no_draft_batches
             << ", requested_draft_tokens=" << requested_draft_tokens
-            << ", drafted_tokens=" << draft_tokens
+            << ", drafted_tokens=" << drafted_tokens
             << ", accepted_draft_tokens=" << accepted_draft_tokens
             << ", draft_hit_rate=" << draft_hit_rate
             << ", accept_rate=" << accept_rate;
@@ -137,6 +138,98 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
               << options_.num_speculative_tokens() << ", cache_max_depth="
               << options_.speculative_suffix_cache_max_depth();
   }
+}
+
+SuffixWorkerImpl::~SuffixWorkerImpl() { flush_all_pld_requests(); }
+
+void SuffixWorkerImpl::ensure_pld_request_stats(const std::string& req_id) {
+  if (use_prompt_lookup_cache_ && options_.pld_enable_request_stats()) {
+    pld_request_stats_.try_emplace(req_id);
+  }
+}
+
+void SuffixWorkerImpl::log_pld_request_stats(const std::string& req_id) const {
+  if (!use_prompt_lookup_cache_ || !options_.pld_enable_request_stats()) {
+    return;
+  }
+
+  auto it = pld_request_stats_.find(req_id);
+  if (it == pld_request_stats_.end()) {
+    return;
+  }
+
+  const PldRequestStats& stats = it->second;
+  const double draft_hit_rate =
+      stats.requested_draft_tokens == 0
+          ? 0.0
+          : static_cast<double>(stats.drafted_tokens) /
+                static_cast<double>(stats.requested_draft_tokens);
+  const double accept_rate =
+      stats.drafted_tokens == 0
+          ? 0.0
+          : static_cast<double>(stats.accepted_draft_tokens) /
+                static_cast<double>(stats.drafted_tokens);
+  const double avg_draft_len =
+      stats.decode_sequence_steps == 0
+          ? 0.0
+          : static_cast<double>(stats.drafted_tokens) /
+                static_cast<double>(stats.decode_sequence_steps);
+  const double avg_accepted_len =
+      stats.decode_sequence_steps == 0
+          ? 0.0
+          : static_cast<double>(stats.accepted_draft_tokens) /
+                static_cast<double>(stats.decode_sequence_steps);
+
+  LOG(INFO) << "PLD request summary: req_id=" << req_id
+            << ", decode_sequence_steps=" << stats.decode_sequence_steps
+            << ", no_draft_sequence_steps=" << stats.no_draft_sequence_steps
+            << ", requested_draft_tokens=" << stats.requested_draft_tokens
+            << ", drafted_tokens=" << stats.drafted_tokens
+            << ", accepted_draft_tokens=" << stats.accepted_draft_tokens
+            << ", draft_hit_rate=" << draft_hit_rate
+            << ", accept_rate=" << accept_rate
+            << ", avg_draft_len_per_sequence_step=" << avg_draft_len
+            << ", avg_accepted_len_per_sequence_step=" << avg_accepted_len
+            << ", validate_waste_tokens=" << stats.validate_waste_tokens;
+}
+
+void SuffixWorkerImpl::cleanup_inactive_requests(
+    const std::unordered_set<std::string>& current_req_ids) {
+  for (const std::string& req_id : suffix_active_decode_req_ids_) {
+    if (current_req_ids.find(req_id) != current_req_ids.end()) {
+      continue;
+    }
+
+    if (use_prompt_lookup_cache_) {
+      log_pld_request_stats(req_id);
+      prompt_lookup_cache_->stop_request(req_id);
+      pld_request_stats_.erase(req_id);
+    } else if (suffix_cache_->has_active_request(req_id)) {
+      suffix_cache_->stop_request(req_id);
+    }
+    suffix_recent_tokens_.erase(req_id);
+  }
+}
+
+void SuffixWorkerImpl::flush_all_pld_requests() {
+  if (use_prompt_lookup_cache_) {
+    for (const auto& entry : suffix_recent_tokens_) {
+      const std::string& req_id = entry.first;
+      log_pld_request_stats(req_id);
+      if (prompt_lookup_cache_->has_request(req_id)) {
+        prompt_lookup_cache_->stop_request(req_id);
+      }
+    }
+    pld_request_stats_.clear();
+  } else if (suffix_cache_ != nullptr) {
+    for (const std::string& req_id : suffix_active_decode_req_ids_) {
+      if (suffix_cache_->has_active_request(req_id)) {
+        suffix_cache_->stop_request(req_id);
+      }
+    }
+  }
+  suffix_recent_tokens_.clear();
+  suffix_active_decode_req_ids_.clear();
 }
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
@@ -194,6 +287,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
         if (!prompt_lookup_cache_->has_request(req_id)) {
           prompt_lookup_cache_->start_request(req_id, seq_tokens);
           suffix_recent_tokens_[req_id].clear();
+          ensure_pld_request_stats(req_id);
         } else {
           prompt_lookup_cache_->add_prompt(req_id, seq_tokens);
         }
@@ -253,24 +347,16 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const bool has_request_ids =
       (suffix_cache_ != nullptr || prompt_lookup_cache_ != nullptr) &&
       request_ids.size() == static_cast<size_t>(num_sequences);
+  const bool enable_pld_request_stats = options_.pld_enable_request_stats();
   if (has_request_ids) {
     std::unordered_set<std::string> current_req_ids;
+    current_req_ids.reserve(num_sequences);
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
       if (!request_ids[seq_id].empty()) {
         current_req_ids.insert(request_ids[seq_id]);
       }
     }
-
-    for (const auto& req_id : suffix_active_decode_req_ids_) {
-      if (current_req_ids.find(req_id) == current_req_ids.end()) {
-        if (use_prompt_lookup_cache_) {
-          prompt_lookup_cache_->stop_request(req_id);
-        } else if (suffix_cache_->has_active_request(req_id)) {
-          suffix_cache_->stop_request(req_id);
-        }
-        suffix_recent_tokens_.erase(req_id);
-      }
-    }
+    cleanup_inactive_requests(current_req_ids);
     suffix_active_decode_req_ids_ = std::move(current_req_ids);
   }
 
@@ -318,6 +404,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         if (!history.empty()) {
           prompt_lookup_cache_->start_request(
               req_id, std::span<const int32_t>(history.data(), history.size()));
+          ensure_pld_request_stats(req_id);
           LOG_EVERY_N(WARNING, 100)
               << "PLD request cache missing during decode; rebuilt cache "
                  "from recent token history. req_id="
@@ -366,6 +453,16 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     if (use_prompt_lookup_cache_) {
       max_accepted_tokens_per_seq_[seq_id] = fill_count + 1;
       total_pld_draft_tokens += fill_count;
+      if (enable_pld_request_stats) {
+        PldRequestStats& stats = pld_request_stats_[req_id];
+        ++stats.decode_sequence_steps;
+        stats.requested_draft_tokens +=
+            static_cast<uint64_t>(num_speculative_tokens);
+        stats.drafted_tokens += static_cast<uint64_t>(fill_count);
+        if (fill_count == 0) {
+          ++stats.no_draft_sequence_steps;
+        }
+      }
     }
     for (int32_t i = 0; i < fill_count; ++i) {
       draft_tokens_flat[seq_id * num_speculative_tokens + i] =
@@ -424,7 +521,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                              pld_no_draft_batches_,
                              pld_requested_draft_tokens_total_,
                              pld_draft_tokens_total_,
-                             pld_accepted_draft_tokens_total_);
+                             pld_accepted_draft_tokens_total_,
+                             options_.pld_stats_log_interval());
 
       output.sample_output.embeddings = torch::Tensor();
       if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
@@ -434,6 +532,17 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     }
 
     pld_draft_tokens_total_ += static_cast<uint64_t>(total_pld_draft_tokens);
+    if (enable_pld_request_stats) {
+      for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+        const std::string& req_id = req_ids[seq_id];
+        if (req_id.empty()) {
+          continue;
+        }
+        pld_request_stats_[req_id].validate_waste_tokens +=
+            static_cast<uint64_t>(num_speculative_tokens -
+                                  draft_token_counts[seq_id]);
+      }
+    }
   }
 
   ForwardInput validate_input;
@@ -517,8 +626,13 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         const int32_t accepted_draft_tokens =
             first_reject_idx < 0 ? num_speculative_tokens
                                  : std::max(0, first_reject_idx);
-        accepted_pld_draft_tokens +=
+        const int32_t bounded_accepted_draft_tokens =
             std::min(accepted_draft_tokens, draft_token_counts[seq_id]);
+        accepted_pld_draft_tokens += bounded_accepted_draft_tokens;
+        if (enable_pld_request_stats) {
+          pld_request_stats_[req_id].accepted_draft_tokens +=
+              static_cast<uint64_t>(bounded_accepted_draft_tokens);
+        }
       }
 
       if (seq_id < 8) {
@@ -558,7 +672,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                              pld_no_draft_batches_,
                              pld_requested_draft_tokens_total_,
                              pld_draft_tokens_total_,
-                             pld_accepted_draft_tokens_total_);
+                             pld_accepted_draft_tokens_total_,
+                             options_.pld_stats_log_interval());
     }
   }
 

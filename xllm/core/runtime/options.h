@@ -77,6 +77,10 @@ struct Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
+  PROPERTY(bool, pld_enable_request_stats) = false;
+
+  PROPERTY(int32_t, pld_stats_log_interval) = 1024;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 
