@@ -45,6 +45,8 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl {
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const torch::Tensor& draft_token_ids,
                         const torch::Tensor& draft_probs,
+                        bool enable_variable_pld_validate,
+                        const std::vector<int32_t>& validate_token_counts,
                         const ForwardOutput& target_output);
 
   struct PldRequestStats {

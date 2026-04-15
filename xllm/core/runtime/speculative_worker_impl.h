@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <span>
 #include <vector>
 
 #include "common/macros.h"
@@ -130,12 +131,14 @@ class SpeculativeWorkerImpl : public WorkerImpl {
 
   // Common helper: update sampling params for validation
   void update_sampling_params(SamplingParameters& sampling_params,
-                              const int32_t num_val_tokens,
+                              std::span<const int32_t> validate_token_counts,
                               const int32_t total_num_val_tokens);
 
   // prepare inputs for target model at Decode phase (validation).
-  void prepare_validate_inputs(const ForwardInput& inputs,
-                               ForwardInput& validate_inputs);
+  void prepare_validate_inputs(
+      const ForwardInput& inputs,
+      ForwardInput& validate_inputs,
+      std::span<const int32_t> draft_token_counts = std::span<const int32_t>());
 
  protected:
   // Target model worker

@@ -53,6 +53,15 @@ std::string summarize_int32_span(std::span<const int32_t> values,
   return out;
 }
 
+int32_t get_max_validate_token_count(
+    const std::vector<int32_t>& validate_token_counts) {
+  if (validate_token_counts.empty()) {
+    return 0;
+  }
+  return *std::max_element(validate_token_counts.begin(),
+                           validate_token_counts.end());
+}
+
 }  // namespace
 
 namespace {
@@ -343,6 +352,11 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const int32_t num_sequences = input.input_params.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const auto& request_ids = input.input_params.request_ids;
+  const bool enable_variable_pld_validate =
+      use_prompt_lookup_cache_ && !input.sampling_params.logprobs &&
+      input.sampling_params.max_top_logprobs <= 0 &&
+      rate_controller_ == nullptr &&
+      input.input_params.dp_global_token_nums.size() <= 1;
 
   const bool has_request_ids =
       (suffix_cache_ != nullptr || prompt_lookup_cache_ != nullptr) &&
@@ -370,8 +384,10 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
   std::vector<int32_t> draft_token_counts(num_sequences, 0);
+  std::vector<int32_t> validate_token_counts(num_sequences, num_val_tokens);
   std::vector<std::string> req_ids(num_sequences);
-  max_accepted_tokens_per_seq_.assign(num_sequences, num_val_tokens);
+  max_accepted_tokens_per_seq_.assign(
+      num_sequences, use_prompt_lookup_cache_ ? 1 : num_val_tokens);
   int32_t total_pld_draft_tokens = 0;
   int32_t pld_attempted_sequences = 0;
 
@@ -451,6 +467,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
         std::min<int32_t>(num_speculative_tokens, draft_token_ids.size());
     draft_token_counts[seq_id] = fill_count;
     if (use_prompt_lookup_cache_) {
+      if (enable_variable_pld_validate) {
+        validate_token_counts[seq_id] = fill_count + 1;
+      }
       max_accepted_tokens_per_seq_[seq_id] = fill_count + 1;
       total_pld_draft_tokens += fill_count;
       if (enable_pld_request_stats) {
@@ -546,8 +565,20 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   }
 
   ForwardInput validate_input;
-  prepare_validate_inputs(input, validate_input);
+  if (enable_variable_pld_validate) {
+    prepare_validate_inputs(
+        input,
+        validate_input,
+        std::span<const int32_t>(draft_token_counts.data(),
+                                 draft_token_counts.size()));
+  } else {
+    prepare_validate_inputs(input, validate_input);
+  }
   validate_input.skip_sampling_for_logits_only = true;
+  const int32_t max_validate_tokens =
+      enable_variable_pld_validate
+          ? get_max_validate_token_count(validate_token_counts)
+          : num_val_tokens;
 
   auto draft_token_ids_cpu =
       torch::tensor(draft_tokens_flat,
@@ -558,9 +589,34 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
   auto& validate_token_ids = validate_input.token_ids;
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
-    auto draft_col_tensor = draft_token_ids_int.select(/*dim=*/1, /*index=*/i);
     auto mask = (validate_token_ids == -1 * (i + 1));
-    validate_token_ids.masked_scatter_(mask, draft_col_tensor);
+    if (enable_variable_pld_validate) {
+      std::vector<int32_t> draft_col_values;
+      draft_col_values.reserve(num_sequences);
+      for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+        if (draft_token_counts[seq_id] <= i) {
+          continue;
+        }
+        draft_col_values.emplace_back(
+            draft_tokens_flat[seq_id * num_speculative_tokens + i]);
+      }
+      if (!draft_col_values.empty()) {
+        CHECK_EQ(mask.sum().item<int64_t>(),
+                 static_cast<int64_t>(draft_col_values.size()))
+            << "variable-length PLD placeholder count mismatch for draft idx="
+            << i;
+        torch::Tensor draft_col_tensor =
+            torch::tensor(draft_col_values,
+                          torch::TensorOptions()
+                              .dtype(torch::kInt)
+                              .device(validate_input.token_ids.device()));
+        validate_token_ids.masked_scatter_(mask, draft_col_tensor);
+      }
+    } else {
+      auto draft_col_tensor =
+          draft_token_ids_int.select(/*dim=*/1, /*index=*/i);
+      validate_token_ids.masked_scatter_(mask, draft_col_tensor);
+    }
   }
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -584,8 +640,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                                       .device(target_output.logits.device()));
 
   timer.reset();
-  SampleOutput val_output = validate(
-      input.sampling_params, draft_token_ids, draft_probs, target_output);
+  SampleOutput val_output = validate(input.sampling_params,
+                                     draft_token_ids,
+                                     draft_probs,
+                                     enable_variable_pld_validate,
+                                     validate_token_counts,
+                                     target_output);
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -593,7 +653,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       request_ids.size() == static_cast<size_t>(num_sequences)) {
     torch::Tensor accepted_tokens =
         safe_to(val_output.next_tokens, torch::kCPU).to(torch::kInt);
-    accepted_tokens = accepted_tokens.view({num_sequences, num_val_tokens});
+    accepted_tokens =
+        accepted_tokens.view({num_sequences, max_validate_tokens});
     Slice<int32_t> accepted_tokens_slice = {
         accepted_tokens.data_ptr<int32_t>(),
         static_cast<size_t>(accepted_tokens.numel())};
@@ -606,12 +667,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
       }
 
       std::vector<int32_t> accepted;
-      accepted.reserve(num_val_tokens);
+      accepted.reserve(validate_token_counts[seq_id]);
       int32_t first_reject_idx = -1;
       std::vector<int32_t> row_tokens;
-      row_tokens.reserve(num_val_tokens);
-      for (int32_t j = 0; j < num_val_tokens; ++j) {
-        int32_t token = accepted_tokens_slice[seq_id * num_val_tokens + j];
+      row_tokens.reserve(validate_token_counts[seq_id]);
+      for (int32_t j = 0; j < validate_token_counts[seq_id]; ++j) {
+        int32_t token = accepted_tokens_slice[seq_id * max_validate_tokens + j];
         row_tokens.emplace_back(token);
         if (token < 0) {
           if (first_reject_idx < 0) {
@@ -689,45 +750,27 @@ SampleOutput SuffixWorkerImpl::validate(
     const SamplingParameters& sampling_params,
     const torch::Tensor& draft_token_ids,
     const torch::Tensor& draft_probs,
+    bool enable_variable_pld_validate,
+    const std::vector<int32_t>& validate_token_counts,
     const ForwardOutput& target_output) {
   (void)sampling_params;
-  const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t batch_size =
       static_cast<int32_t>(draft_token_ids.size(/*dim=*/0));
   const int32_t vocab_size =
       static_cast<int32_t>(target_output.logits.size(/*dim=*/-1));
-  CHECK_EQ(target_output.logits.size(/*dim=*/0),
-           static_cast<int64_t>(batch_size) * num_val_tokens)
-      << "suffix validate logits shape mismatch";
+  if (!use_prompt_lookup_cache_ || !enable_variable_pld_validate) {
+    const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
+    CHECK_EQ(target_output.logits.size(/*dim=*/0),
+             static_cast<int64_t>(batch_size) * num_val_tokens)
+        << "suffix validate logits shape mismatch";
 
-  using ISlice = torch::indexing::Slice;
-  auto target_logits =
-      target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-  // Use target greedy token as the bonus token, consistent with greedy verify.
-  auto bonus_token_ids =
-      target_logits.index({ISlice(), num_val_tokens - 1, ISlice()})
-          .argmax(/*dim=*/-1, /*keepdim=*/true);
+    using ISlice = torch::indexing::Slice;
+    auto target_logits =
+        target_output.logits.view({batch_size, num_val_tokens, vocab_size});
+    auto bonus_token_ids =
+        target_logits.index({ISlice(), num_val_tokens - 1, ISlice()})
+            .argmax(/*dim=*/-1, /*keepdim=*/true);
 
-  SampleOutput sample_output;
-  const bool use_pld_greedy_fast_path =
-      use_prompt_lookup_cache_ && !target_output.logprobs &&
-      target_output.max_top_logprobs <= 0 && rate_controller_ == nullptr;
-  if (use_pld_greedy_fast_path) {
-    auto target_token_ids =
-        target_logits.slice(/*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1)
-            .argmax(/*dim=*/-1);
-    auto accepted =
-        target_token_ids == draft_token_ids.to(target_token_ids.device());
-    auto accepted_mask = RejectionSampler::build_accepted_mask(accepted);
-    auto accepted_token_ids =
-        torch::cat({target_token_ids, bonus_token_ids}, /*dim=*/-1);
-    sample_output.next_tokens =
-        torch::where(accepted_mask,
-                     accepted_token_ids,
-                     -torch::ones_like(accepted_token_ids));
-  } else {
-    // Suffix decoding always uses greedy sampling for validation,
-    // regardless of the user's sampling parameters.
     auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
     auto rejection_sampler =
         std::make_unique<RejectionSampler>(greedy_do_sample,
@@ -738,36 +781,142 @@ SampleOutput SuffixWorkerImpl::validate(
                                            rate_controller_,
                                            enable_fused_kernel_);
 
-    sample_output =
+    SampleOutput sample_output =
         rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
                                    draft_probs.to(target_logits.device()),
                                    target_logits,
                                    bonus_token_ids,
                                    /*mask_out_rejected_tokens=*/true);
+
+    auto embeddings = target_output.sample_output.embeddings;
+    sample_output.embeddings =
+        embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
+
+    for (int32_t seq_id = 0;
+         seq_id < static_cast<int32_t>(max_accepted_tokens_per_seq_.size());
+         ++seq_id) {
+      const int32_t keep_tokens =
+          std::clamp(max_accepted_tokens_per_seq_[seq_id], 1, num_val_tokens);
+      if (keep_tokens < num_val_tokens) {
+        sample_output.next_tokens[seq_id]
+            .slice(/*dim=*/0, /*start=*/keep_tokens)
+            .fill_(-1);
+      }
+    }
+
+    torch::Tensor mask = (sample_output.next_tokens == -1).to(torch::kInt64);
+    size_t count = mask.sum().item<int64_t>();
+    size_t num_draft_tokens =
+        static_cast<size_t>(batch_size) * options_.num_speculative_tokens();
+    COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
+    COUNTER_ADD(speculative_num_accepted_tokens_total,
+                num_draft_tokens - count);
+    return sample_output;
   }
 
-  auto embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings =
-      embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
+  CHECK_EQ(static_cast<int32_t>(validate_token_counts.size()), batch_size)
+      << "validate_token_counts size mismatch";
+  const int32_t max_validate_tokens =
+      get_max_validate_token_count(validate_token_counts);
+  int32_t total_num_val_tokens = 0;
+  for (int32_t validate_token_count : validate_token_counts) {
+    total_num_val_tokens += validate_token_count;
+  }
+  CHECK_EQ(target_output.logits.size(/*dim=*/0),
+           static_cast<int64_t>(total_num_val_tokens))
+      << "suffix validate logits shape mismatch";
+
+  SampleOutput sample_output;
+  const bool use_pld_greedy_fast_path =
+      use_prompt_lookup_cache_ && !target_output.logprobs &&
+      target_output.max_top_logprobs <= 0 && rate_controller_ == nullptr;
+  CHECK(use_pld_greedy_fast_path)
+      << "variable-length PLD validate currently requires greedy-only output";
+
+  torch::Tensor next_tokens =
+      torch::full({batch_size, max_validate_tokens},
+                  -1,
+                  torch::TensorOptions()
+                      .dtype(torch::kLong)
+                      .device(target_output.logits.device()));
+  int32_t row_offset = 0;
+  int64_t accepted_draft_tokens_total = 0;
+  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
+    const int32_t seq_num_val_tokens = validate_token_counts[seq_id];
+    const int32_t seq_num_draft_tokens = seq_num_val_tokens - 1;
+    torch::Tensor seq_logits = target_output.logits.slice(
+        /*dim=*/0,
+        /*start=*/row_offset,
+        /*end=*/row_offset + seq_num_val_tokens);
+    row_offset += seq_num_val_tokens;
+    torch::Tensor seq_bonus_token_id =
+        seq_logits.select(/*dim=*/0, /*index=*/seq_num_val_tokens - 1)
+            .argmax(/*dim=*/-1, /*keepdim=*/true);
+    torch::Tensor seq_target_token_ids =
+        seq_num_draft_tokens == 0
+            ? torch::empty({0},
+                           torch::TensorOptions()
+                               .dtype(torch::kLong)
+                               .device(target_output.logits.device()))
+            : seq_logits
+                  .slice(/*dim=*/0,
+                         /*start=*/0,
+                         /*end=*/seq_num_draft_tokens)
+                  .argmax(/*dim=*/-1);
+    if (seq_num_draft_tokens == 0) {
+      next_tokens[seq_id]
+          .slice(/*dim=*/0, /*start=*/0, /*end=*/1)
+          .copy_(seq_bonus_token_id);
+      continue;
+    }
+
+    torch::Tensor seq_draft_token_ids =
+        draft_token_ids[seq_id]
+            .slice(/*dim=*/0, /*start=*/0, /*end=*/seq_num_draft_tokens)
+            .to(seq_target_token_ids.device());
+    torch::Tensor seq_accepted =
+        seq_target_token_ids ==
+        seq_draft_token_ids.to(seq_target_token_ids.device());
+    torch::Tensor seq_accepted_mask =
+        RejectionSampler::build_accepted_mask(seq_accepted.unsqueeze(0))
+            .squeeze(0);
+    torch::Tensor seq_accepted_token_ids =
+        torch::cat({seq_target_token_ids, seq_bonus_token_id}, /*dim=*/0);
+    torch::Tensor seq_output_tokens =
+        torch::where(seq_accepted_mask,
+                     seq_accepted_token_ids,
+                     -torch::ones_like(seq_accepted_token_ids));
+    next_tokens[seq_id]
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/seq_num_val_tokens)
+        .copy_(seq_output_tokens);
+
+    torch::Tensor seq_prefix_accept =
+        seq_accepted.to(torch::kInt32).cumprod(/*dim=*/0);
+    accepted_draft_tokens_total += seq_prefix_accept.sum().item<int64_t>();
+  }
+
+  sample_output.next_tokens = next_tokens;
+  sample_output.embeddings = torch::Tensor();
 
   for (int32_t seq_id = 0;
        seq_id < static_cast<int32_t>(max_accepted_tokens_per_seq_.size());
        ++seq_id) {
-    const int32_t keep_tokens =
-        std::clamp(max_accepted_tokens_per_seq_[seq_id], 1, num_val_tokens);
-    if (keep_tokens < num_val_tokens) {
+    const int32_t keep_tokens = std::clamp(
+        max_accepted_tokens_per_seq_[seq_id], 1, validate_token_counts[seq_id]);
+    if (keep_tokens < validate_token_counts[seq_id]) {
       sample_output.next_tokens[seq_id]
           .slice(/*dim=*/0, /*start=*/keep_tokens)
           .fill_(-1);
     }
   }
 
-  torch::Tensor mask = (sample_output.next_tokens == -1).to(torch::kInt64);
-  size_t count = mask.sum().item<int64_t>();
-  size_t num_draft_tokens =
-      static_cast<size_t>(batch_size) * options_.num_speculative_tokens();
+  size_t num_draft_tokens = 0;
+  for (int32_t validate_token_count : validate_token_counts) {
+    num_draft_tokens += static_cast<size_t>(validate_token_count - 1);
+  }
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total, num_draft_tokens - count);
+  COUNTER_ADD(speculative_num_accepted_tokens_total,
+              static_cast<size_t>(accepted_draft_tokens_total));
 
   return sample_output;
 }

@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "speculative_worker_impl.h"
 
+#include <algorithm>
+
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "spec_input_builder.h"
@@ -32,6 +34,13 @@ namespace {
                   ? tensor_.repeat_interleave(/*repeats=*/repeats, /*dim=*/0) \
                   : tensor_;                                                  \
   } while (0)
+
+void repeat_sampling_tensor_by_counts(torch::Tensor& tensor,
+                                      const torch::Tensor& repeat_counts) {
+  tensor = tensor.defined()
+               ? tensor.repeat_interleave(/*repeats=*/repeat_counts, /*dim=*/0)
+               : tensor;
+}
 
 }  // namespace
 
@@ -163,11 +172,11 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
 
 void SpeculativeWorkerImpl::update_sampling_params(
     SamplingParameters& sampling_params,
-    const int32_t num_val_tokens,
+    std::span<const int32_t> validate_token_counts,
     const int32_t total_num_val_tokens) {
   std::vector<int32_t> selected_token_idxes_vec;
   selected_token_idxes_vec.reserve(total_num_val_tokens);
-  for (int32_t i = 0; i < total_num_val_tokens; i++) {
+  for (int32_t i = 0; i < total_num_val_tokens; ++i) {
     selected_token_idxes_vec.emplace_back(i);
   }
   torch::Tensor selected_token_idxes = torch::tensor(selected_token_idxes_vec);
@@ -176,30 +185,89 @@ void SpeculativeWorkerImpl::update_sampling_params(
   sampling_params.selected_token_idxes = selected_token_idxes.to(device_);
   sampling_params.sample_idxes = selected_token_idxes.to(device_);
 
-  TENSOR_REPEAT(sampling_params.frequency_penalties, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.presence_penalties, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.repetition_penalties, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.temperatures, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.top_p, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.top_k, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.unique_token_ids, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.unique_token_counts, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.unique_token_ids_lens, num_val_tokens);
-  TENSOR_REPEAT(sampling_params.do_sample, num_val_tokens);
+  const int32_t repeated_num_val_tokens =
+      validate_token_counts.empty() ? 1 : validate_token_counts.front();
+  const bool all_equal_validate_token_counts =
+      std::all_of(validate_token_counts.begin(),
+                  validate_token_counts.end(),
+                  [repeated_num_val_tokens](int32_t validate_token_count) {
+                    return validate_token_count == repeated_num_val_tokens;
+                  });
+  if (all_equal_validate_token_counts) {
+    TENSOR_REPEAT(sampling_params.frequency_penalties, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.presence_penalties, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.repetition_penalties,
+                  repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.temperatures, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.top_p, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.top_k, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.unique_token_ids, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.unique_token_counts, repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.unique_token_ids_lens,
+                  repeated_num_val_tokens);
+    TENSOR_REPEAT(sampling_params.do_sample, repeated_num_val_tokens);
+    return;
+  }
+
+  torch::Tensor repeat_counts =
+      torch::tensor(std::vector<int32_t>(validate_token_counts.begin(),
+                                         validate_token_counts.end()),
+                    torch::TensorOptions().dtype(torch::kLong));
+  repeat_sampling_tensor_by_counts(sampling_params.frequency_penalties,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.presence_penalties,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.repetition_penalties,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.temperatures, repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.top_p, repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.top_k, repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.unique_token_ids,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.unique_token_counts,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.unique_token_ids_lens,
+                                   repeat_counts);
+  repeat_sampling_tensor_by_counts(sampling_params.do_sample, repeat_counts);
 }
 
 void SpeculativeWorkerImpl::prepare_validate_inputs(
     const ForwardInput& input,
-    ForwardInput& validate_input) {
+    ForwardInput& validate_input,
+    std::span<const int32_t> draft_token_counts) {
   validate_input = input.to(device_, dtype_);
   auto& input_params = validate_input.input_params;
   torch::TensorOptions int_options = validate_input.token_ids.options();
 
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   const int32_t num_sequences = input_params.num_sequences;
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
-  const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
+  std::vector<int32_t> validate_token_counts_vec;
+  validate_token_counts_vec.reserve(num_sequences);
+  int32_t total_num_val_tokens = 0;
+  int32_t max_num_val_tokens = 0;
+  if (!draft_token_counts.empty()) {
+    CHECK_EQ(static_cast<int32_t>(draft_token_counts.size()), num_sequences)
+        << "draft_token_counts size mismatch, expected=" << num_sequences
+        << ", actual=" << draft_token_counts.size();
+  }
+  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+    const int32_t draft_count = draft_token_counts.empty()
+                                    ? num_speculative_tokens
+                                    : draft_token_counts[seq_id];
+    CHECK_GE(draft_count, 0)
+        << "invalid draft_count=" << draft_count << ", seq_id=" << seq_id;
+    CHECK_LE(draft_count, num_speculative_tokens)
+        << "draft_count exceeds num_speculative_tokens, draft_count="
+        << draft_count << ", num_speculative_tokens=" << num_speculative_tokens
+        << ", seq_id=" << seq_id;
+    const int32_t validate_token_count = draft_count + 1;
+    validate_token_counts_vec.emplace_back(validate_token_count);
+    total_num_val_tokens += validate_token_count;
+    if (validate_token_count > max_num_val_tokens) {
+      max_num_val_tokens = validate_token_count;
+    }
+  }
 
   torch::Tensor token_ids = safe_to(input.token_ids, torch::kCPU);
   torch::Tensor positions = safe_to(input.positions, torch::kCPU);
@@ -220,6 +288,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   std::vector<int32_t> atb_q_seq_lens_vec = {};
   int32_t atb_kv_max_seq_len = 0;
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+    const int32_t seq_num_val_tokens = validate_token_counts_vec[seq_id];
     int32_t start_position = view.positions[seq_id];
     int32_t kv_len =
         specBuilder::calc_kv_len(view.kv_seq_lens, seq_id, /*offset=*/0);
@@ -227,7 +296,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
         << "validate position/kv_len mismatch, seq_id=" << seq_id
         << ", start_position=" << start_position << ", kv_len=" << kv_len;
 
-    for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
+    for (int32_t val_idx = 0; val_idx < seq_num_val_tokens; ++val_idx) {
       specBuilder::RowSpec row;
       row.seq_id = seq_id;
       if (val_idx == 0) {
@@ -243,10 +312,11 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     }
 
     if (FLAGS_enable_atb_spec_kernel) {
-      const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
+      const int32_t kv_len_after_validation = kv_len + seq_num_val_tokens - 1;
       specBuilder::update_kv_seq_lens_and_max(
           atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
-      specBuilder::append_seq_len_by_layout(atb_q_seq_lens_vec, num_val_tokens);
+      specBuilder::append_seq_len_by_layout(atb_q_seq_lens_vec,
+                                            seq_num_val_tokens);
     }
   }
 
@@ -263,7 +333,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     input_params.q_max_seq_len = 1;
     input_params.batch_forward_type = BatchForwardType::DECODE;
   } else {
-    input_params.q_max_seq_len = num_val_tokens;
+    input_params.q_max_seq_len = max_num_val_tokens;
     input_params.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   }
   if (FLAGS_enable_atb_spec_kernel) {
@@ -294,11 +364,18 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
 
   // update the sampling_params
   update_sampling_params(
-      validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
+      validate_input.sampling_params,
+      std::span<const int32_t>(validate_token_counts_vec.data(),
+                               validate_token_counts_vec.size()),
+      total_num_val_tokens);
 
   // update dp_global_token_nums for dp/ep parallel
-  for (auto& it : input_params.dp_global_token_nums) {
-    it *= num_val_tokens;
+  if (num_sequences > 0) {
+    for (int32_t& it : input_params.dp_global_token_nums) {
+      it = static_cast<int32_t>(static_cast<int64_t>(it) *
+                                static_cast<int64_t>(total_num_val_tokens) /
+                                static_cast<int64_t>(num_sequences));
+    }
   }
 }
 
