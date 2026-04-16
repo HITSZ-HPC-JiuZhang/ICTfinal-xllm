@@ -1,0 +1,66 @@
+# 2026-04-15 qwen3.5 tilelang backport
+
+- Time: 2026-04-15 Asia/Shanghai
+- Branch: feat/op
+- Goal: manually backport TileLang Ascend kernel infrastructure and `c326cb7` fused GDN gating path for Qwen3.5 decode on the contest branch without merge/rebase.
+- Touched modules/files:
+  - `.gitmodules`
+  - `setup.py`
+  - `xllm/compiler/**`
+  - `xllm/core/kernels/npu/CMakeLists.txt`
+  - `xllm/core/kernels/npu/tilelang/**`
+  - `xllm/core/kernels/ops_api.cpp`
+  - local submodule path `third_party/tilelang-ascend`
+- Key findings / root cause:
+  - `c326cb7` is not standalone on this branch; it depends on the earlier TileLang Ascend compiler/runtime scaffolding.
+  - `ae9c62dc` style qwen3.5 conv-state fix is already present on this branch.
+  - Local runtime validation was blocked by environment, not by backported code:
+    - local offline `prepare_ascend` path tried to install Python deps without network;
+    - one alternate prebuilt TileLang tree had `GLIBC_2.38` requirement mismatch against this container.
+- Commands run:
+  - `git show --stat --summary --oneline c326cb7`
+  - `git show --stat --summary --oneline ae9c62dc`
+  - `python3 -m compileall xllm/compiler`
+  - attempted `python3 xllm/compiler/tilelang_launcher.py compile-kernels --target ascend ...` (stopped later per user request to skip compile/run)
+- Validation status:
+  - Completed: Python static import/bytecode validation for `xllm/compiler/**`
+  - Skipped by user request: full build / compile / runtime verification
+  - Environment blockers observed during attempted validation were recorded above
+- Next steps / risks:
+  - run build with a TileLang tree compiled for this container's glibc;
+  - verify manifest generation for `rope` and `fused_gdn_gating`;
+  - benchmark Qwen3.5-9B 64K+1K and 128K+1K output TPS after startup succeeds.
+
+
+# 2026-04-15 qwen3.5 tilelang backport (向后移植)
+
+- **Time (时间)**: 2026-04-15 Asia/Shanghai
+- **Branch (分支)**: feat/op
+- **Goal (目标)**: 在不进行 merge/rebase (合并/变基) 的情况下，在比赛分支上手动向后移植 (backport) TileLang Ascend 内核基础设施以及用于 Qwen3.5 解码的 `c326cb7` 融合 GDN gating (门控) 路径。
+- **Touched modules/files (涉及的模块/文件)**:
+  - `.gitmodules`
+  - `setup.py`
+  - `xllm/compiler/**`
+  - `xllm/core/kernels/npu/CMakeLists.txt`
+  - `xllm/core/kernels/npu/tilelang/**`
+  - `xllm/core/kernels/ops_api.cpp`
+  - 本地子模块路径 `third_party/tilelang-ascend`
+- **Key findings / root cause (主要发现 / 根本原因)**:
+  - `c326cb7` 提交在此分支上无法独立存在；它依赖于早期的 TileLang Ascend 编译器/运行时脚手架 (scaffolding)。
+  - `ae9c62dc` 风格的 Qwen3.5 卷积状态 (conv-state) 修复已经存在于此分支上。
+  - 本地的运行时验证由于环境问题而被阻塞（并非因为向后移植的代码问题）：
+    - 本地离线的 `prepare_ascend` 流程尝试在无网络连接的情况下安装 Python 依赖项；
+    - 另一个作为替代的预编译的 TileLang 树存在 `GLIBC_2.38` 版本要求，与当前容器环境不兼容。
+- **Commands run (执行的命令)**:
+  - `git show --stat --summary --oneline c326cb7`
+  - `git show --stat --summary --oneline ae9c62dc`
+  - `python3 -m compileall xllm/compiler`
+  - 尝试执行 `python3 xllm/compiler/tilelang_launcher.py compile-kernels --target ascend ...` (随后根据用户要求停止，跳过了编译/运行步骤)
+- **Validation status (验证状态)**:
+  - **Completed (已完成)**: 对 `xllm/compiler/**` 下的文件进行了 Python 静态导入和字节码验证。
+  - **Skipped by user request (应用户要求跳过)**: 完整的构建 / 编译 / 运行时验证。
+  - 在尝试验证期间观察到的环境阻塞问题已在上面记录。
+- **Next steps / risks (后续步骤 / 风险)**:
+  - 使用针对当前容器的 glibc 版本专门编译的 TileLang 树来运行构建；
+  - 验证 `rope` 和 `fused_gdn_gating` 的 manifest 生成情况；
+  - 在程序成功启动后，对 Qwen3.5-9B 模型的 64K+1K 和 128K+1K 的 Output TPS (每秒输出 token 吞吐量) 进行基准测试。

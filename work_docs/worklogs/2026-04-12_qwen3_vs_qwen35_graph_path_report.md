@@ -1,0 +1,39 @@
+# Qwen3 vs Qwen3.5 graph path comparison report
+
+- Date: 2026-04-12
+- Branch: feat/ictfinal-qwen3.5
+- Task goal: Compare the graph-mode adaptation path of Qwen3 and current Qwen3.5 to guide the next repair iteration for Qwen3.5 TP + graph on NPU.
+- Touched modules/files:
+  - `docs/zh/design/graph_mode_design.md`
+  - `docs/zh/features/graph_mode.md`
+  - `xllm/models/model_registry.cpp`
+  - `xllm/models/llm/qwen3.h`
+  - `xllm/models/llm/npu/qwen3.h`
+  - `xllm/models/llm/qwen3_next.h`
+  - `xllm/models/llm/qwen3_5.h`
+  - `xllm/models/llm/qwen3_next_hybrid_base.h`
+  - `xllm/core/layers/npu/npu_qwen3_decoder_layer_impl.cpp`
+  - `xllm/core/layers/npu_torch/qwen3_next_hybrid_decoder_layer_base.cpp`
+  - `xllm/core/layers/npu_torch/qwen3_next_attention.cpp`
+  - `xllm/core/layers/npu_torch/qwen3_gated_delta_net_base.cpp`
+  - `xllm/core/layers/npu_torch/qwen3_next_gated_delta_net.cpp`
+  - `xllm/core/layers/npu_torch/qwen3_5_gated_delta_net.cpp`
+  - `xllm/core/layers/common/linear.cpp`
+  - `xllm/core/layers/common/attention_metadata_builder.cpp`
+  - `xllm/core/runtime/acl_graph_executor_impl.cpp`
+  - `xllm/core/framework/parallel_state/process_group.cpp`
+  - `xllm/core/framework/parallel_state/npu_process_group.cpp`
+- Key findings:
+  - Qwen3 graph support on NPU is primarily the `qwen3_atb` path, not the generic Torch decoder path.
+  - Qwen3.5 is TORCH-only on NPU and inherits the Qwen3Next hybrid runtime/model path, so its graph correctness depends on framework-level TP collectives being graph-safe.
+  - The main graph-sensitive divergence is not only projection packing; it is that Qwen3.5 decode repeatedly crosses `ColumnParallelLinear` / `RowParallelLinear` TP collectives in both full-attention and GDN paths, while Qwen3 ATB encapsulates more of the decode path inside ATB operations with graph-oriented tiling inputs.
+  - Therefore the next repair priority remains communication semantics first, then hybrid-layer graph assumptions, then Qwen3.5-only projection path audit.
+- Commands run:
+  - `rg --files ... | rg "qwen3|qwen3_5|qwen3_next|graph|parallel_state|linear|attention|gated_delta|process_group|acl_graph|model_registry"`
+  - `nl -ba <file> | sed -n ...` on the files listed above
+- Validation status:
+  - Static code/document inspection only.
+  - No new compile/runtime validation performed in this task.
+- Next steps / risks:
+  - Validate whether remaining degeneration still comes from native TP collective ordering or from another graph-sensitive host/path assumption in hybrid decode.
+  - Add targeted instrumentation to distinguish full-attention collective corruption from GDN collective corruption.
